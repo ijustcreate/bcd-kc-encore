@@ -51,8 +51,9 @@
   const diagnostics = {
     startedAt: performance.now(), lastFrameAt: 0, frameCount: 0, presentedCount: 0,
     totalFrameMs: 0, maxFrameMs: 0, totalUpdateMs: 0, totalRenderMs: 0,
-    maxStallMs: 0, droppedFrameCount: 0
+    maxStallMs: 0, droppedFrameCount: 0, activeUntil: 0
   };
+  const failedImages = new Set();
 
   function resetDiagnostics() {
     diagnostics.startedAt = performance.now(); diagnostics.lastFrameAt = 0;
@@ -560,23 +561,29 @@
         },
         device: {
           viewport: `${innerWidth}x${innerHeight}`, canvas: `${canvas.width}x${canvas.height}`,
+          screen: screen.width && screen.height ? `${screen.width}x${screen.height}` : 'unavailable',
+          orientation: screen.orientation?.type || (innerWidth >= innerHeight ? 'landscape (inferred)' : 'portrait (inferred)'),
           dpr: Number((devicePixelRatio || 1).toFixed(2)), touch: navigator.maxTouchPoints > 0,
           platform: navigator.userAgentData?.platform || navigator.platform || 'unavailable',
-          userAgent: navigator.userAgent.slice(0, 180), visibility: document.visibilityState
+          userAgent: navigator.userAgent.slice(0, 180)
         },
         runtime: {
           embedded: window.parent !== window, touchPresentation: TOUCH_PRESENTATION,
           renderIntervalMs: RENDER_INTERVAL_MS, renderer: rigs.some(rig => rig?.usesWebGL) ? 'WebGL2' : 'Canvas2D',
           loadedRigs: rigs.filter(rig => rig?.ready).length, failedRigs: rigs.filter(rig => rig?.failed).length,
-          sourceCacheEntries: cache?.entries ?? 'unavailable'
+          failedImages: [...failedImages], sourceCacheEntries: cache?.entries ?? 'unavailable',
+          quality: 'native 640x360; image smoothing off', visibility: document.visibilityState,
+          focused: document.hasFocus(), presentationCap: TOUCH_PRESENTATION ? 15 : 60
         },
         room: {
           mode: game.room?.authoritative ? 'authoritative' : 'offline-practice',
           connected: Boolean(game.room?.connected),
           admission: game.room?.connected ? 'accepted' : (game.room?.authoritative ? (game.roomStatusReason === 'room_full' || game.roomStatusReason === 'server_full' ? 'rejected-full' : 'pending') : 'offline'),
-          status: game.roomStatusReason || 'unavailable', players: Number.isFinite(game.roomCount) ? game.roomCount : null,
+          status: game.roomStatusReason || (game.room?.authoritative ? 'unavailable' : 'offline'), players: Number.isFinite(game.roomCount) ? game.roomCount : null,
+          occupancyVerified: Number.isFinite(game.roomCount),
           visibleRemotes: remotePlayersInRange(game.camera.x - 30, game.camera.x + canvas.width + 30, MAX_VISIBLE_REMOTE_SPRITES).length
-        }
+        },
+        unavailable: ['GPU timing', 'device temperature', 'battery health', 'memory pressure']
       }
     };
   }
@@ -2271,8 +2278,10 @@
       shutdown().finally(() => window.parent.postMessage({ type: 'bcd:encore:disposed' }, event.origin));
     }
     if (trustedParent && event.data?.type === 'bcd:encore:diagnostics:request') {
+      const now = performance.now();
+      if (now > diagnostics.activeUntil) resetDiagnostics();
+      diagnostics.activeUntil = now + 2500;
       const report = diagnosticReport();
-      resetDiagnostics();
       window.parent.postMessage(report, event.origin);
     }
   });
@@ -2413,43 +2422,40 @@
 
   function frame(now) {
     if (disposed) return;
-    const frameStarted = performance.now();
+    const collectDiagnostics = now <= diagnostics.activeUntil;
     if (!frame.last) frame.last = now;
-    if (diagnostics.lastFrameAt) {
+    if (collectDiagnostics && diagnostics.lastFrameAt) {
       const gap = now - diagnostics.lastFrameAt;
+      diagnostics.totalFrameMs += gap;
+      diagnostics.maxFrameMs = Math.max(diagnostics.maxFrameMs, gap);
       diagnostics.maxStallMs = Math.max(diagnostics.maxStallMs, gap);
       if (gap > (1000 / (TOUCH_PRESENTATION ? 15 : 60)) * 1.5) diagnostics.droppedFrameCount++;
     }
-    diagnostics.lastFrameAt = now;
-    diagnostics.frameCount++;
+    if (collectDiagnostics) { diagnostics.lastFrameAt = now; diagnostics.frameCount++; }
     frame.accumulator = Math.min(.1, (frame.accumulator || 0) + (now - frame.last) / 1000);
     frame.last = now;
     let steps = 0;
-    const updateStarted = performance.now();
+    const updateStarted = collectDiagnostics ? performance.now() : 0;
     while (frame.accumulator >= STEP && steps < 2) {
       update();
       frame.updateCount = (frame.updateCount || 0) + 1;
       frame.accumulator -= STEP;
       steps += 1;
     }
-    diagnostics.totalUpdateMs += performance.now() - updateStarted;
+    if (collectDiagnostics) diagnostics.totalUpdateMs += performance.now() - updateStarted;
     // Presentation is independent from fixed simulation. Rendering only when
     // a physics step lands can skip alternating 60 Hz frames due to fractional
     // clock deltas; cap high-refresh displays at 60 instead of painting twice.
     if (!frame.lastRender || now - frame.lastRender >= RENDER_INTERVAL_MS - .5) {
-      const renderStarted = performance.now();
+      const renderStarted = collectDiagnostics ? performance.now() : 0;
       render();
-      diagnostics.totalRenderMs += performance.now() - renderStarted;
-      diagnostics.presentedCount++;
+      if (collectDiagnostics) { diagnostics.totalRenderMs += performance.now() - renderStarted; diagnostics.presentedCount++; }
       frame.renderCount = (frame.renderCount || 0) + 1;
       frame.lastRender = now;
     }
     // Never enter an unbounded catch-up spiral after a suspended/backgrounded
     // tab, but retain two steps so 30 Hz displays keep full-speed simulation.
     if (steps === 2 && frame.accumulator >= STEP) frame.accumulator = 0;
-    const frameMs = performance.now() - frameStarted;
-    diagnostics.totalFrameMs += frameMs;
-    diagnostics.maxFrameMs = Math.max(diagnostics.maxFrameMs, frameMs);
     animationFrame = requestAnimationFrame(frame);
   }
 
@@ -2466,7 +2472,7 @@
     const fallbackImages = Promise.all(Object.entries(imageSources).map(([key, source]) => new Promise(resolve => {
       const image = new Image();
       image.onload = () => { images[key] = image; resolve(); };
-      image.onerror = () => resolve();
+      image.onerror = () => { failedImages.add(key); resolve(); };
       image.src = window.encoreAssetUrl(source);
     })));
     const ashRig = ash?.load().catch(error => {
