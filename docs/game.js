@@ -281,7 +281,8 @@
     room: null,
     // null means no verified presence snapshot is available. Never render it
     // as zero: a rejected or disconnected socket has no room occupancy data.
-    roomCount: null
+    roomCount: null,
+    roomStatusReason: null
   };
 
   for (const zone of CAPTURE_ZONES) game.remoteCaptureMembers.set(zone.id, new Map());
@@ -571,8 +572,9 @@
         },
         room: {
           mode: game.room?.authoritative ? 'authoritative' : 'offline-practice',
-          connected: Boolean(game.room?.connected), admission: game.room?.admission || 'unavailable',
-          status: game.room?.statusReason || 'unavailable', players: Number.isFinite(game.roomCount) ? game.roomCount : 0,
+          connected: Boolean(game.room?.connected),
+          admission: game.room?.connected ? 'accepted' : (game.room?.authoritative ? (game.roomStatusReason === 'room_full' || game.roomStatusReason === 'server_full' ? 'rejected-full' : 'pending') : 'offline'),
+          status: game.roomStatusReason || 'unavailable', players: Number.isFinite(game.roomCount) ? game.roomCount : null,
           visibleRemotes: remotePlayersInRange(game.camera.x - 30, game.camera.x + canvas.width + 30, MAX_VISIBLE_REMOTE_SPRITES).length
         }
       }
@@ -1384,6 +1386,7 @@
     });
     game.room.addEventListener('status', event => {
       const { connected, reason } = event.detail;
+      game.roomStatusReason = reason || (connected ? 'live' : 'unknown');
       // EncoreRoom owns these fields; the HUD and diagnostics both consume
       // the same admission/status contract rather than inferring from count.
       const labels = { offline: 'OFFLINE PRACTICE', connecting: 'CONNECTING', reconnecting: 'RECONNECTING · PAUSED', room_full: 'ROOM FULL', server_full: 'SERVER FULL', invalid_server: 'SERVER UNAVAILABLE', session_replaced: 'SESSION OPEN ELSEWHERE', version_mismatch: 'RELOAD REQUIRED', left: 'DISCONNECTED' };
