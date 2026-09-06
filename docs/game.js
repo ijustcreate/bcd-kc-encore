@@ -46,6 +46,20 @@
   // enough for responsive touch play and reserves each render slot for the
   // full-quality cached pose instead of dropping into a 1 FPS backlog.
   const RENDER_INTERVAL_MS = 1000 / (TOUCH_PRESENTATION ? 15 : 60);
+  // Bounded, opt-in diagnostics. These counters are cheap enough to collect
+  // continuously, but are only serialized when the host asks for a report.
+  const diagnostics = {
+    startedAt: performance.now(), lastFrameAt: 0, frameCount: 0, presentedCount: 0,
+    totalFrameMs: 0, maxFrameMs: 0, totalUpdateMs: 0, totalRenderMs: 0,
+    maxStallMs: 0, droppedFrameCount: 0
+  };
+
+  function resetDiagnostics() {
+    diagnostics.startedAt = performance.now(); diagnostics.lastFrameAt = 0;
+    diagnostics.frameCount = diagnostics.presentedCount = 0;
+    diagnostics.totalFrameMs = diagnostics.maxFrameMs = diagnostics.totalUpdateMs = diagnostics.totalRenderMs = 0;
+    diagnostics.maxStallMs = diagnostics.droppedFrameCount = 0;
+  }
   const PLAYER_HALF_W = 9;
   const PLAYER_H = 34;
   const PLAYER_CROUCH_H = 21;
@@ -522,6 +536,47 @@
   function setRoomStatus(text, online = false) {
     const node = document.getElementById('roomStatus');
     if (node) { node.textContent = text; node.classList.toggle('is-online', online); }
+  }
+
+  function diagnosticReport() {
+    const seconds = Math.max(.001, (performance.now() - diagnostics.startedAt) / 1000);
+    const rigs = [ash, playerTwoRig, botRig, ...creatureRigs.values()].filter(Boolean);
+    const cache = window.BulletAgeCharacter?.getAssetCacheStats?.();
+    return {
+      type: 'bcd:encore:diagnostics:report', version: BUILD_VERSION,
+      report: {
+        sampleSeconds: Number(seconds.toFixed(1)),
+        presentation: {
+          rafFps: Number((diagnostics.frameCount / seconds).toFixed(1)),
+          presentedFps: Number((diagnostics.presentedCount / seconds).toFixed(1)),
+          averageFrameMs: Number((diagnostics.totalFrameMs / Math.max(1, diagnostics.frameCount)).toFixed(2)),
+          maxFrameMs: Number(diagnostics.maxFrameMs.toFixed(2)), maxStallMs: Number(diagnostics.maxStallMs.toFixed(2)),
+          droppedFrames: diagnostics.droppedFrameCount
+        },
+        costs: {
+          averageUpdateMs: Number((diagnostics.totalUpdateMs / Math.max(1, diagnostics.frameCount)).toFixed(2)),
+          averageRenderMs: Number((diagnostics.totalRenderMs / Math.max(1, diagnostics.presentedCount)).toFixed(2))
+        },
+        device: {
+          viewport: `${innerWidth}x${innerHeight}`, canvas: `${canvas.width}x${canvas.height}`,
+          dpr: Number((devicePixelRatio || 1).toFixed(2)), touch: navigator.maxTouchPoints > 0,
+          platform: navigator.userAgentData?.platform || navigator.platform || 'unavailable',
+          userAgent: navigator.userAgent.slice(0, 180), visibility: document.visibilityState
+        },
+        runtime: {
+          embedded: window.parent !== window, touchPresentation: TOUCH_PRESENTATION,
+          renderIntervalMs: RENDER_INTERVAL_MS, renderer: rigs.some(rig => rig?.usesWebGL) ? 'WebGL2' : 'Canvas2D',
+          loadedRigs: rigs.filter(rig => rig?.ready).length, failedRigs: rigs.filter(rig => rig?.failed).length,
+          sourceCacheEntries: cache?.entries ?? 'unavailable'
+        },
+        room: {
+          mode: game.room?.authoritative ? 'authoritative' : 'offline-practice',
+          connected: Boolean(game.room?.connected), admission: game.room?.admission || 'unavailable',
+          status: game.room?.statusReason || 'unavailable', players: Number.isFinite(game.roomCount) ? game.roomCount : 0,
+          visibleRemotes: remotePlayersInRange(game.camera.x - 30, game.camera.x + canvas.width + 30, MAX_VISIBLE_REMOTE_SPRITES).length
+        }
+      }
+    };
   }
 
   function setLoadout(character, color) {
@@ -2212,6 +2267,11 @@
     if (trustedParent && event.data?.type === 'bcd:encore:command' && event.data.payload?.command === 'close') {
       shutdown().finally(() => window.parent.postMessage({ type: 'bcd:encore:disposed' }, event.origin));
     }
+    if (trustedParent && event.data?.type === 'bcd:encore:diagnostics:request') {
+      const report = diagnosticReport();
+      resetDiagnostics();
+      window.parent.postMessage(report, event.origin);
+    }
   });
 
   let shutdownPromise;
@@ -2350,27 +2410,43 @@
 
   function frame(now) {
     if (disposed) return;
+    const frameStarted = performance.now();
     if (!frame.last) frame.last = now;
+    if (diagnostics.lastFrameAt) {
+      const gap = now - diagnostics.lastFrameAt;
+      diagnostics.maxStallMs = Math.max(diagnostics.maxStallMs, gap);
+      if (gap > (1000 / (TOUCH_PRESENTATION ? 15 : 60)) * 1.5) diagnostics.droppedFrameCount++;
+    }
+    diagnostics.lastFrameAt = now;
+    diagnostics.frameCount++;
     frame.accumulator = Math.min(.1, (frame.accumulator || 0) + (now - frame.last) / 1000);
     frame.last = now;
     let steps = 0;
+    const updateStarted = performance.now();
     while (frame.accumulator >= STEP && steps < 2) {
       update();
       frame.updateCount = (frame.updateCount || 0) + 1;
       frame.accumulator -= STEP;
       steps += 1;
     }
+    diagnostics.totalUpdateMs += performance.now() - updateStarted;
     // Presentation is independent from fixed simulation. Rendering only when
     // a physics step lands can skip alternating 60 Hz frames due to fractional
     // clock deltas; cap high-refresh displays at 60 instead of painting twice.
     if (!frame.lastRender || now - frame.lastRender >= RENDER_INTERVAL_MS - .5) {
+      const renderStarted = performance.now();
       render();
+      diagnostics.totalRenderMs += performance.now() - renderStarted;
+      diagnostics.presentedCount++;
       frame.renderCount = (frame.renderCount || 0) + 1;
       frame.lastRender = now;
     }
     // Never enter an unbounded catch-up spiral after a suspended/backgrounded
     // tab, but retain two steps so 30 Hz displays keep full-speed simulation.
     if (steps === 2 && frame.accumulator >= STEP) frame.accumulator = 0;
+    const frameMs = performance.now() - frameStarted;
+    diagnostics.totalFrameMs += frameMs;
+    diagnostics.maxFrameMs = Math.max(diagnostics.maxFrameMs, frameMs);
     animationFrame = requestAnimationFrame(frame);
   }
 
