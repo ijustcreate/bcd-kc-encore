@@ -1,8 +1,8 @@
-# Mobile rendering build 1.3
+# Rendering and multiplayer movement build 1.4
 
-The default touch/coarse-pointer renderer uses compiled animation sheets. Desktop
-keeps Spine 3.7; `?renderer=baked` and `?renderer=spine` select either path explicitly.
-The mobile document does not load Spine, JSON skeletons, original character
+The default renderer uses compiled animation sheets on both phones and desktop.
+Spine 3.7 remains available as a diagnostic comparison; `?renderer=baked` and `?renderer=spine` select either path explicitly.
+The default document does not load Spine, JSON skeletons, original character
 textures, or original high-resolution backgrounds. No mesh or recoloring work
 runs during a mobile match. Available art is shared by actors using the same sheet.
 
@@ -43,19 +43,68 @@ animation timing, ground offsets, asynchronous color races, P2 selection, bat
 corpse rendering and pixel comparisons with the original Spine renderer. Desktop
 emulation is a regression check, not a measurement of physical iPhone performance.
 
-Physical acceptance: test build 1.3 on the affected iPhone both directly and from
+Physical acceptance: test build 1.4 on the affected iPhone both directly and from
 BCD, including movement, three sword directions, shooting, bat deaths and color
 changes. Target sustained 60 FPS with a practical 30 FPS floor over a ten-minute
 session. Compare host rAF, game rAF and submissions; submission counts are not a
 hardware measurement of displayed frames. If both clocks still stall, compare
 the standalone route with the embedded route before changing the renderer again.
 
-## Multiplayer work remaining
+## Multiplayer motion
 
-Current deployment remains offline practice until a verified authority endpoint
-is configured. The existing server owns outcomes at 60 Hz and broadcasts at 15 Hz.
-This rendering release does not add local prediction, input acknowledgement,
-reconciliation, or buffered remote interpolation. Those require a shared movement
-core and network latency tests, rather than increasing snapshot frequency. Test an
-eight-player room with latency/jitter and reconnects before claiming mobile
-multiplayer readiness.
+`player-movement.js` contains the shared collision/movement implementation used by
+both authority and prediction. The browser predicts its local actor only. Server
+snapshots acknowledge **consumed** input commands and include the fractional
+movement, jump/dash and cooldown state needed for deterministic replay. The client
+rebases on that state and replays only unacknowledged commands. Small corrections
+fade visually; death, respawn, disconnect and epoch changes reset prediction.
+
+Commands are generated at fixed 60 Hz and sent in bounded batches at 30 Hz. The
+server consumes at most one command per simulation tick, rejects replayed command
+numbers and bounds each input queue to 120 entries. Flooding commands cannot buy
+simulation time. Profiles and positions supplied inside commands are ignored.
+Legacy clients continue using held-button packets. Prediction is negotiated in
+welcome, so updated clients remain compatible with an older deployed authority.
+
+Remote players, bot, creatures, projectiles and hearts are presented from a bounded
+snapshot buffer (100–200 ms adaptive delay). Positions interpolate; discrete
+health and attack state remains authoritative. Teleports and respawns never slide
+across the arena. Moving platforms under the predicted local actor use the matching
+predicted movement timeline. Rendering restores the authoritative world after
+its synchronous presentation pass. Remote fighters use the same compiled authored
+art as the local fighter, with decoded sheets shared where possible.
+
+Snapshot JSON is serialized once per room broadcast, rather than once per client.
+Damage, kills, pickup ownership, AI, captures and respawn selection stay server-owned.
+
+Validation:
+
+```
+node --test tests/*.test.mjs
+node tests/baked-character.browser.cjs
+node tests/authority-browser.mjs
+node tests/prediction-browser.mjs
+```
+
+The network browser suite introduces ordered 70–110 ms one-way delay and jitter,
+checks immediate local response before server receipt, acknowledgement convergence,
+remote interpolation, eight-player rendering and reconnect into a full room.
+These are desktop phone emulation checks; physical-device thermal and public
+internet latency testing still requires the live server.
+
+## Live deployment requirement
+
+GitHub Pages publishes the client only. `authority-config.js` remains empty until
+a persistent host with TLS/WebSocket support is deployed and publicly verified.
+The updated Dockerfile includes the shared movement module. The server can be
+built from the repository root:
+
+```
+docker build -f server/Dockerfile -t encore-authority .
+docker run --rm -p 8787:8787 -e ALLOWED_ORIGINS=https://ijustcreate.github.io encore-authority
+```
+
+Terminate TLS at the host, forward `/encore` WebSocket upgrades, then configure the
+verified `wss://HOST/encore` endpoint. Use exactly one replica. No paid resources
+or hosting accounts are created by this release. An empty endpoint intentionally
+retains offline practice rather than falsely presenting an online room.

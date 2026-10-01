@@ -15,7 +15,7 @@ No database or secret client key is required. Room admission and server-issued r
 ## Operational limits
 
 - One replica/process; no cluster mode, horizontal autoscaling or overlapping deployments. Stop the old process before starting its replacement. Scaling beyond one process needs a room directory with exclusive ownership leases first.
-- 60 Hz fixed simulation, 15 Hz complete snapshots, 30 Hz client input. WebSocket compression reduces repeated snapshot data on mobile connections; compression context and concurrency are bounded. Clients do not simulate shared AI, collisions or pickup outcomes. Remote melee, facing, damage, health and death presentation derives from snapshots.
+- 60 Hz fixed simulation, 15 Hz complete snapshots, 30 Hz client input. WebSocket compression reduces repeated snapshot data on mobile connections; compression context and concurrency are bounded. Clients predict their local movement using shared collision code; damage, shared AI and pickup outcomes remain server-owned. Input commands run at 60 Hz and travel in bounded 30 Hz batches, with consumed-command acknowledgements for reconciliation. Remote positions interpolate between snapshots. Remote melee, facing, damage, health and death presentation derives from snapshots.
 - Eight slots per room. Admission is first-come and never evicts existing players. Transient disconnections reserve a slot for 15 seconds; voluntary leave releases it immediately. Held input expires after 0.5 seconds without controls. A socket with no client traffic is closed after 10 seconds.
 - Full snapshots support late join and reconnect without event-history replay. A server restart creates a new epoch and **resets the match**. Match state is currently in memory; there are no durable scores or match checkpoints.
 - Slow sockets are disconnected before queuing large stale snapshots. Client status/remote indexes clear immediately on disconnect or rejection; online simulation freezes until a new server snapshot arrives.
@@ -29,8 +29,9 @@ Free Render can host a hobby demonstration with managed TLS, but it sleeps after
 npm test --prefix server
 node --test tests/heart-drops.test.mjs tests/corpse-physics.test.mjs
 node tests/authority-browser.mjs
+node tests/prediction-browser.mjs
 ```
 
 The network suite uses real WebSocket clients and tests late joins, shared bot targeting, simultaneous lethal attacks, exactly one heart roll/kill credit, falling hearts, one pickup/one heal, death/respawn, reconnect, 8-slot admission/cleanup, forged/replayed inputs, profiles, same-player recolor and contested capture. The headless browser test covers desktop and mobile presentation, actual keyboard controls, snapshots, disabled client simulation, reconnect cleanup and rejection. Physical-phone FPS and public latency still require real-device verification after deployment.
 
-The simulation ports the authored game's movement/attack rules into `simulation.mjs`; future gameplay changes must update this server module. Offline practice retains the client physics. Pure respawn, corpse and heart helpers are shared where applicable.
+The authority and online prediction share movement/collision rules in `docs/player-movement.js`. Server combat/outcomes live in `simulation.mjs`. Offline practice retains its existing client simulation. Pure respawn, corpse and heart helpers are shared where applicable.

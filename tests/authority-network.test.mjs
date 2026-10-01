@@ -6,6 +6,25 @@ import { createAuthority } from '../server/index.mjs';
 import { createSimulation } from '../server/simulation.mjs';
 
 const origin = 'http://127.0.0.1:4193';
+test('batched commands acknowledge consumed input only, reject replay and cannot buy extra simulation time', async t => {
+  const { server, join, advance } = await setup(t);
+  const client = await join();
+  assert.equal(client.hello.predictionVersion, 1);
+  const sim = server.rooms.get('qa').sim, p = sim.game.players.get(client.hello.id);
+  const commands = Array.from({ length: 12 }, (_, seq) => ({ seq, input: { right: true, health: 999, x: 99999 } }));
+  client.ws.send(JSON.stringify({ type: 'inputs', commands }));
+  await until(() => p.inputQueue.length === 12);
+  assert.equal(p.ackInputSeq, -1, 'receipt is not simulation acknowledgement');
+  await advance(4);
+  assert.equal(p.ackInputSeq, 3); assert.equal(p.inputQueue.length, 8);
+  assert.equal(sim.game.frame, 4); assert.ok(p.x < 130); assert.equal(p.health, 3);
+  assert.equal(client.snapshot().players[0].ackInputSeq, 3);
+  client.ws.send(JSON.stringify({ type: 'inputs', commands }));
+  await pause(); assert.equal(p.inputQueue.length, 8, 'replays cannot enqueue again');
+  await advance(8); assert.equal(p.ackInputSeq, 11);
+  const before = p.x; await advance(4);
+  assert.ok(p.x > before, 'held controls bridge a short packet gap');
+});
 const pause = () => new Promise(resolve => setTimeout(resolve, 5));
 async function until(fn) {
   for (let i = 0; i < 400; i++) { const value = fn(); if (value) return value; await pause(); }

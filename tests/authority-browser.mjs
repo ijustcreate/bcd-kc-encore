@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { createAuthority } from '../server/index.mjs';
 import { createSimulation } from '../server/simulation.mjs';
 import { WebSocket } from '../server/node_modules/ws/wrapper.mjs';
-const require = createRequire('C:/Users/17148/.codex/skills/develop-web-game/package.json');
+const require = createRequire(process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES ? path.join(process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES, 'playwright/package.json') : import.meta.url);
 const { chromium } = require('playwright');
 const root = path.resolve('docs');
 const out = path.resolve('output/authority-browser'); fs.mkdirSync(out, { recursive: true });
@@ -22,9 +22,9 @@ const staticServer = http.createServer((req, res) => {
 });
 await new Promise(resolve => staticServer.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${staticServer.address().port}`;
-const server = createAuthority({ origins: [base], autoTick: false, simulationFactory: () => createSimulation({ random: () => .25 }) });
+const server = createAuthority({ origins: [base], autoTick: false, enablePrediction: false, simulationFactory: () => createSimulation({ random: () => .25 }) });
 const addr = await server.listen(); authorityUrl = `ws://127.0.0.1:${addr.port}/encore`;
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, executablePath: process.env.ENCORE_CHROMIUM || undefined, args: ['--no-sandbox'] });
 const errors = [];
 const clients = [];
 async function open(name, mobile = false) {
@@ -36,7 +36,13 @@ async function open(name, mobile = false) {
   await page.evaluate(name => window.postMessage({ type:'bcd:encore:init', payload:{playerName:name} }, location.origin), name);
   clients.push(page); return page;
 }
-const state = page => page.evaluate(() => { window.advanceTime(0); return JSON.parse(window.render_game_to_text()); });
+const state = page => page.evaluate(() => {
+  window.advanceTime(0);
+  const result = JSON.parse(window.render_game_to_text());
+  // Rig poses are buffered presentation; compare authoritative creature state.
+  result.creatures.forEach(creature => { delete creature.rigAnimation; });
+  return result;
+});
 async function advance(frames) {
   for (let i = 0; i < frames; i++) server.tick();
   const tick = server.rooms.get('royal').sim.game.frame;

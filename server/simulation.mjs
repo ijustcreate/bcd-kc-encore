@@ -1,7 +1,8 @@
+import movement from '../docs/player-movement.js';
 import spawnSelector from '../docs/spawn-selector.js';
 import { createHeartDrops } from './heart-drops.mjs';
 import { stepBatCorpse } from './corpse-physics.mjs';
-// Server-only physics port from docs/game.js (published Celestefall rules).
+// Server-only outcomes and AI; player movement is shared with online prediction.
 // A room owns this closure; selected player context never leaves a synchronous tick.
 // No DOM, browser clients, timers or networking can advance this simulation.
   const STEP = 1 / 60;
@@ -621,187 +622,11 @@ export function createSimulation({ random = Math.random } = {}) {
   }
 
   function updatePlayer() {
-    const p = game.player;
-    const wasGrounded = p.grounded;
-
-    if (p.dropping > 0) p.dropping -= 1;
-    p.shootTimer = Math.max(0, p.shootTimer - 1);
-    p.shootCooldown = Math.max(0, p.shootCooldown - 1);
-    p.meleeTimer = Math.max(0, p.meleeTimer - 1);
-    p.meleeCooldown = Math.max(0, p.meleeCooldown - 1);
-    p.stompCooldown = Math.max(0, p.stompCooldown - 1);
-    p.dashTimer = Math.max(0, p.dashTimer - 1);
-    p.dashCooldown = Math.max(0, p.dashCooldown - 1);
-    p.hitTimer = Math.max(0, p.hitTimer - 1);
-    p.respawnPulse = Math.max(0, p.respawnPulse - 1);
-
-    if (!p.alive) {
-      p.respawnTimer = Math.max(0, p.respawnTimer - 1);
-      p.animationTime += STEP;
-      if (p.respawnTimer <= 0) respawnPlayer();
-
-      input.jumpPressed = input.shootReleased = input.meleePressed = input.dashPressed = false;
-      return;
-    }
-
-    const movementDirection = Number(input.right) - Number(input.left);
-    if (input.shootHeld) {
-      const aim = aimVector();
-      p.aimX = aim.x;
-      p.aimY = aim.y;
-      p.aiming = true;
-      if (Math.abs(aim.x) > .2) p.facing = Math.sign(aim.x);
-    }
-    if (input.shootReleased && !p.aiming) {
-      const aim = aimVector();
-      p.aimX = aim.x;
-      p.aimY = aim.y;
-      p.aiming = true;
-    }
-    const direction = p.aiming ? 0 : movementDirection;
-    if (!p.aiming && direction) p.facing = direction;
-
-    if (input.shootReleased && p.aiming && p.shootCooldown <= 0) {
-      spawnProjectile(p, 'player', p.aimX, p.aimY);
-      p.shootTimer = 15;
-      p.shootCooldown = 16;
-      p.aiming = false;
-      p.aimX = p.facing;
-      p.aimY = 0;
-      vibrate(9);
-    }
-    if (!input.shootHeld && !input.shootReleased) p.aiming = false;
-
-    if (input.meleePressed && p.meleeCooldown <= 0) {
-      const verticalAim = Math.abs(input.aimAxisY) > .15
-        ? input.aimAxisY
-        : Number(input.down) - Number(input.up);
-      const horizontalAim = Math.abs(input.aimAxisX) > .15
-        ? input.aimAxisX
-        : Number(input.right) - Number(input.left);
-      const meleeDirection = verticalAim < -.35 ? 'up' : (verticalAim > .35 ? 'down' : 'forward');
-      if (Math.abs(horizontalAim) > .2) p.facing = Math.sign(horizontalAim);
-      beginMelee(p, meleeDirection);
-      p.meleeCooldown = 24;
-      vibrate(11);
-    }
-
-    if (input.dashPressed && p.dashCooldown <= 0) {
-      let dashX = direction;
-      let dashY = Number(input.down) - Number(input.up);
-      if (!dashX && !dashY) dashX = p.facing;
-      const length = Math.hypot(dashX, dashY) || 1;
-      p.dashVX = dashX / length * 6.6;
-      p.dashVY = dashY / length * 6.6;
-      p.dashTimer = 10;
-      p.dashCooldown = 40;
-      p.crouching = false;
-      emitDust(p.x, p.y, 10);
-      vibrate(15);
-    }
-
-    p.grounded = standingSurface();
-    if (p.grounded) p.coyote = 7;
-    else p.coyote = Math.max(0, p.coyote - 1);
-    if (input.jumpPressed) p.jumpBuffer = 7;
-    else p.jumpBuffer = Math.max(0, p.jumpBuffer - 1);
-
-    // Down is a true crouch. Down + Jump intentionally drops through pink
-    // one-way platforms, leaving the joystick's down direction useful on land.
-    if (input.down && input.jumpPressed && p.grounded?.kind === 'oneway') {
-      p.dropping = 12;
-      p.y += 5;
-      p.grounded = false;
-      p.jumpBuffer = 0;
-    }
-
-    const wantsCrouch = Boolean(input.down && p.grounded);
-    if (wantsCrouch) p.crouching = true;
-    else if (!collidesSolid(p.x, p.y, PLAYER_H)) p.crouching = false;
-    p.lookingUp = Boolean(input.up && p.grounded && !p.crouching && direction === 0);
-
-    const wallSide = sideSurface(1) ? 1 : (sideSurface(-1) ? -1 : 0);
-    // Clinging is automatic only when Ash is airborne and the player is
-    // actively pressing the joystick toward the wall.
-    p.clinging = Boolean(wallSide && !p.grounded && direction === wallSide && p.dashTimer <= 0);
-    p.clingSide = p.clinging ? wallSide : 0;
-
-    if (p.dashTimer > 0) {
-      p.clinging = false;
-      p.vx = p.dashVX;
-      p.vy = p.dashVY;
-    } else if (p.clinging) {
-      p.vx = 0;
-      p.vy = .12;
-      p.yRemainder = 0;
-      if (p.jumpBuffer > 0) {
-        p.clinging = false;
-        p.vx = -wallSide * 3.8;
-        p.vy = -7.2;
-        p.facing = -wallSide;
-        p.jumpBuffer = 0;
-        emitDust(p.x + wallSide * 7, p.y - 8, 7);
-        vibrate(14);
-      }
-    } else {
-      const topSpeed = p.crouching ? .75 : (p.lookingUp ? 0 : 2.25);
-      const targetSpeed = direction * topSpeed;
-      const acceleration = p.grounded ? .3 : .16;
-      const deceleration = p.grounded ? .38 : .09;
-      p.vx = approach(p.vx, targetSpeed, direction ? acceleration : deceleration);
-      if (p.jumpBuffer > 0 && p.coyote > 0 && !p.crouching) {
-        p.vy = -7.2;
-        p.jumpBuffer = 0;
-        p.coyote = 0;
-        p.squash = 1.16;
-        p.stretch = .86;
-        emitDust(p.x, p.y, 6);
-        vibrate(12);
-      } else if (p.grounded) p.vy = 0;
-      else p.vy = Math.min(p.vy + .36, 5.2);
-
-      // Releasing Jump trims upward velocity, which gives short and tall
-      // jumps without changing the single-button mobile layout.
-      if (!input.jumpHeld && p.vy < -3.2) p.vy = approach(p.vy, -3.2, .45);
-    }
-
-    const previousFeetY = p.y;
-    movePlayerX(p.vx);
-    movePlayerY(p.vy);
-    checkHeadStomp(previousFeetY);
-    updateMeleeHit();
-    p.grounded = standingSurface();
-
-    if (!wasGrounded && p.grounded && p.vy === 0) {
-      emitDust(p.x, p.y, 8);
-      p.squash = .82;
-      p.stretch = 1.16;
-      vibrate(8);
-    }
-
-    p.squash += (1 - p.squash) * .2;
-    p.stretch += (1 - p.stretch) * .2;
-    p.animationTime += STEP;
-    if (p.hitTimer > 0) p.animation = 'hit';
-    else if (p.dashTimer > 0) p.animation = 'dash';
-    else if (p.meleeTimer > 0) {
-      p.animation = p.meleeDirection === 'up' ? 'meleeUp' : (p.meleeDirection === 'down' ? 'meleeDown' : 'melee');
-    }
-    else if (p.shootTimer > 0) p.animation = 'shoot';
-    else if (p.aiming && p.aimY < -.35) p.animation = 'look';
-    else if (p.clinging) p.animation = 'cling';
-    else if (!p.grounded) p.animation = p.vy < 0 ? 'jump' : 'fall';
-    else if (p.crouching) p.animation = 'crouch';
-    else if (p.lookingUp) p.animation = 'look';
-    else if (Math.abs(p.vx) > .2) p.animation = 'run';
-    else p.animation = 'idle';
-    p.invulnerable = Math.max(0, p.invulnerable - 1);
-    if (p.y > WORLD.height + 40) hitPlayer(0, -3);
-
-    input.jumpPressed = false;
-    input.shootReleased = false;
-    input.meleePressed = false;
-    input.dashPressed = false;
+    movement.stepPlayer(game.player, input, { fixed, ledges, movers: game.movers, world: WORLD }, {
+      spawnProjectile, respawnPlayer, hitPlayer, checkHeadStomp, updateMeleeHit,
+      resetGame, emitDust, vibrate
+    });
+    input.jumpPressed = input.shootReleased = input.meleePressed = input.dashPressed = false;
   }
 
   function select(player) {
@@ -838,6 +663,7 @@ export function createSimulation({ random = Math.random } = {}) {
   }
 
   function respawnPlayer() {
+    game.player.spawnSerial = (game.player.spawnSerial || 0) + 1;
     const p = game.player;
     const spawn = spawnSelector.chooseRespawn({ world: WORLD, fixed, ledges, movers: game.movers, player: p, actors: [...game.players.values(), game.bot, ...game.creatures], projectiles: game.projectiles, random });
     const identity = { id: p.id, name: p.name, character: p.character, color: p.color, input: p.input, connected: p.connected, kills: p.kills, deaths: p.deaths, creatureKills: p.creatureKills, lastInputTick: p.lastInputTick };
@@ -991,8 +817,12 @@ export function createSimulation({ random = Math.random } = {}) {
     const players = [...game.players.values()];
     for (let i = 0; i < players.length; i++) {
       const p = players[(i + game.frame) % players.length];
-      if (!p.connected || game.frame - p.lastInputTick > 30) p.input = neutralInput();
+      if (!p.connected || game.frame - p.lastInputTick > 30) { p.input = neutralInput(); p.inputQueue = []; }
       else p.input = { ...neutralInput(), ...p.input };
+      if (p.connected && p.inputQueue?.length) {
+        const command = p.inputQueue.shift();
+        p.input = command.input; p.ackInputSeq = command.seq;
+      }
       select(p); attackerId = p.id; updatePlayer();
     }
     const fallback = players[0];
@@ -1014,7 +844,7 @@ export function createSimulation({ random = Math.random } = {}) {
     attackerId = null;
   }
 
-  const publicFields = ['id','name','character','color','x','y','vx','vy','facing','health','maxHealth','alive','respawnTimer','animation','animationTime','meleeTimer','meleeDirection','meleeDuration','shootTimer','dashTimer','dashCooldown','hitTimer','invulnerable','respawnPulse','squash','stretch','aiming','aimX','aimY','crouching','clinging','lookingUp','kills','deaths','creatureKills','width','height','type','connected'];
+  const publicFields = ['ackInputSeq','spawnSerial','xRemainder','yRemainder','clingSide','coyote','jumpBuffer','dropping','shootCooldown','meleeCooldown','meleeConnected','stompCooldown','dashVX','dashVY','id','name','character','color','x','y','vx','vy','facing','health','maxHealth','alive','respawnTimer','animation','animationTime','meleeTimer','meleeDirection','meleeDuration','shootTimer','dashTimer','dashCooldown','hitTimer','invulnerable','respawnPulse','squash','stretch','aiming','aimX','aimY','crouching','clinging','lookingUp','kills','deaths','creatureKills','width','height','type','connected'];
   function actorSnapshot(actor) {
     const result = {};
     for (const key of publicFields) if (actor[key] !== undefined) result[key] = actor[key];
@@ -1035,6 +865,6 @@ export function createSimulation({ random = Math.random } = {}) {
     };
   }
 
-  return { addPlayer, removePlayer: id => game.players.delete(id), step, snapshot, game };
+  return { addPlayer, removePlayer: id => game.players.delete(id), step, snapshot, game, geometry: { fixed, ledges, world: WORLD } };
 
 }

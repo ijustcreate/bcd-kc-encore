@@ -21,7 +21,7 @@ function profile(value = {}) {
 
 // Exactly one process owns each room. Deploy ONE replica; multi-process routing
 // requires a room directory/lease system before increasing that replica count.
-export function createAuthority({ origins = [], maxRooms = 32, reconnectMs = 15000, emptyRoomMs = 60000, autoTick = true, now = () => performance.now(), simulationFactory = createSimulation } = {}) {
+export function createAuthority({ origins = [], maxRooms = 32, reconnectMs = 15000, emptyRoomMs = 60000, autoTick = true, enablePrediction = true, now = () => performance.now(), simulationFactory = createSimulation } = {}) {
   const rooms = new Map();
   const sockets = new Set();
   const httpServer = http.createServer((req, res) => {
@@ -47,7 +47,7 @@ export function createAuthority({ origins = [], maxRooms = 32, reconnectMs = 150
     // Slow/background phones get a new complete snapshot after reconnect;
     // never accumulate seconds of stale gameplay in the browser's TCP queue.
     if (ws.bufferedAmount > 128 * 1024) { ws.close(4008, 'slow_connection'); return; }
-    ws.send(JSON.stringify(value));
+    ws.send(typeof value === 'string' ? value : JSON.stringify(value));
   }
   function reject(ws, reason, details = {}) { send(ws, { type: 'rejected', reason, ...details }); ws.close(4000, reason); }
   function roomSnapshot(room) { return { type: 'snapshot', protocol: PROTOCOL, epoch: room.epoch, ...room.sim.snapshot() }; }
@@ -98,16 +98,37 @@ export function createAuthority({ origins = [], maxRooms = 32, reconnectMs = 150
         const previousSocket = session.socket;
         session.socket = ws; session.seq = -1; session.disconnectedAt = null;
         session.player.connected = true; session.player.input = {};
+        session.player.inputQueue = []; session.player.lastQueuedInputSeq = -1; session.player.ackInputSeq = -1;
         Object.assign(session.player, profile(msg.profile));
         ws.session = session; ws.room = room;
         if (previousSocket && previousSocket !== ws) previousSocket.close(4001, 'session_replaced');
-        send(ws, { type: 'welcome', protocol: PROTOCOL, epoch: room.epoch, id: session.player.id, resumeToken: session.token, maxPlayers: MAX_PLAYERS, snapshotHz: 15 });
+        send(ws, { type: 'welcome', protocol: PROTOCOL, predictionVersion: enablePrediction ? 1 : 0, epoch: room.epoch, id: session.player.id, resumeToken: session.token, maxPlayers: MAX_PLAYERS, snapshotHz: 15 });
         send(ws, roomSnapshot(room));
         return;
       }
       if (ws.session.socket !== ws) return;
       if (msg.type === 'leave') { ws.voluntary = true; disconnect(ws); ws.close(1000, 'left'); return; }
       if (msg.type === 'profile') { Object.assign(ws.session.player, profile(msg.profile)); return; }
+      if (msg.type === 'inputs') {
+        if (!enablePrediction) return;
+        const p = ws.session.player;
+        if (!Array.isArray(msg.commands) || !msg.commands.length || msg.commands.length > 12) return;
+        const accepted = [], pending = p.inputQueue || [];
+        let last = p.lastQueuedInputSeq ?? -1;
+        for (const command of msg.commands) {
+          if (!Number.isSafeInteger(command?.seq) || command.seq < 0 || command.seq <= last || !command.input || typeof command.input !== 'object') continue;
+          const input = {};
+          for (const key of INPUT_BUTTONS) input[key] = command.input[key] === true;
+          for (const key of ['aimAxisX', 'aimAxisY']) input[key] = Number.isFinite(command.input[key]) ? Math.max(-1, Math.min(1, command.input[key])) : 0;
+          accepted.push({ seq: command.seq, input }); last = command.seq;
+        }
+        // Inputs never buy simulation time: at most one command is consumed
+        // per server tick. Reject an unbounded sender instead of a huge backlog.
+        if (pending.length + accepted.length > 120) { reject(ws, 'input_overflow'); return; }
+        p.inputQueue = pending.concat(accepted); p.lastQueuedInputSeq = last;
+        p.lastInputTick = ws.room.sim.game.frame;
+        return;
+      }
       if (msg.type !== 'input') return; // No client state, damage, spawn or outcome messages.
       if (!Number.isSafeInteger(msg.seq) || msg.seq < 0 || msg.seq <= ws.session.seq || !msg.input || typeof msg.input !== 'object') return;
       ws.session.seq = msg.seq;
@@ -137,7 +158,7 @@ export function createAuthority({ origins = [], maxRooms = 32, reconnectMs = 150
       room.emptySince = timestamp;
       room.sim.step();
       if (room.sim.game.frame % 4 === 0) {
-        const snapshot = roomSnapshot(room);
+        const snapshot = JSON.stringify(roomSnapshot(room));
         for (const session of room.sessions.values()) if (session.socket) send(session.socket, snapshot);
       }
     }

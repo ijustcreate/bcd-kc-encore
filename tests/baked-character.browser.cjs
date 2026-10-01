@@ -18,8 +18,8 @@ const root = path.resolve(__dirname, '../docs');
   const base = `http://127.0.0.1:${server.address().port}`;
   const browser = await chromium.launch({ executablePath: process.env.ENCORE_CHROMIUM || undefined, args: ['--no-sandbox'] });
   try {
-    for (const mode of ['phone', 'embedded', 'desktop']) {
-      const context = await browser.newContext({ viewport: { width: 428, height: 926 }, deviceScaleFactor: 3, isMobile: mode !== 'desktop', hasTouch: mode !== 'desktop' });
+    for (const mode of ['phone', 'embedded', 'desktop', 'desktop-spine']) {
+      const context = await browser.newContext({ viewport: { width: 428, height: 926 }, deviceScaleFactor: 3, isMobile: !mode.startsWith('desktop'), hasTouch: !mode.startsWith('desktop') });
       const page = await context.newPage(), errors = [], requests = [];
       page.on('pageerror', e => errors.push(e.message));
       page.on('request', r => requests.push(r.url()));
@@ -29,11 +29,11 @@ const root = path.resolve(__dirname, '../docs');
         const draw = CanvasRenderingContext2D.prototype.drawImage;
         CanvasRenderingContext2D.prototype.drawImage = function (...args) { if (this.canvas.id === 'game' && args[0].width === 1920) window.__renders++; return draw.apply(this, args); };
       });
-      await page.goto(base + (mode === 'embedded' ? '/embed' : '/?admin=1'));
+      await page.goto(base + (mode === 'embedded' ? '/embed' : mode === 'desktop-spine' ? '/?admin=1&renderer=spine' : '/?admin=1'));
       await page.waitForFunction(() => window.__ready);
       const frame = mode === 'embedded' ? page.frames()[1] : page.mainFrame();
-      assert.equal(await frame.evaluate(() => JSON.parse(render_game_to_text()).buildVersion), '1.3');
-      if (mode !== 'desktop') {
+      assert.equal(await frame.evaluate(() => JSON.parse(render_game_to_text()).buildVersion), '1.4');
+      if (!mode.startsWith('desktop')) {
         assert.equal(await frame.evaluate(() => typeof spine), 'undefined');
         assert.equal(requests.some(url => /\/assets\/(ash|player2|bat|slug)\//.test(url)), false);
         assert.equal(requests.some(url => /\/assets\/tower-bg-/.test(url)), false);

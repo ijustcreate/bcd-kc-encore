@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const requested = new URLSearchParams(location.search).get('renderer');
-  const enabled = requested === 'baked' || (requested !== 'spine' && navigator.maxTouchPoints > 0 && window.matchMedia?.('(pointer: coarse)').matches);
+  const enabled = requested !== 'spine';
   window.ENCORE_BAKED_RENDERER = enabled;
   if (!enabled) return;
 

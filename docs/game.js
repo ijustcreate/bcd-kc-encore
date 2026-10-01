@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const BUILD_VERSION = '1.3';
+  const BUILD_VERSION = '1.4';
   let disposed = false;
   let animationFrame = 0;
 
@@ -79,6 +79,7 @@
   let backgroundLayer = null;
   let nextRoomPublishAt = 0;
   const remoteSpriteCache = new Map();
+  const remoteRigs = new Map();
 
   function makeNoteSprite(fill, stroke) {
     const surface = document.createElement('canvas');
@@ -322,6 +323,16 @@
 
   function upsertRemote(payload) {
     if (!payload?.id) return null;
+    if (window.ENCORE_BAKED_RENDERER) {
+      const appearance = `${payload.character}:${payload.color}`;
+      if (remoteRigs.get(payload.id)?.appearance !== appearance) {
+        const rig = new window.BulletAgeCharacter(ctx, payload.character === 'p2'
+          ? { assetName: 'Player2', basePath: 'assets/player2' } : {});
+        rig.setTeamChroma(payload.character, payload.color);
+        remoteRigs.set(payload.id, { appearance, rig });
+        rig.load().catch(error => { rig.failed = true; console.error('Remote character sheet failed to load.', error); });
+      }
+    }
     const remote = game.remotePlayers.get(payload.id);
     if (remote) {
       removeRemoteFromIndexes(remote);
@@ -336,6 +347,7 @@
   }
 
   function removeRemote(id) {
+    remoteRigs.delete(id);
     const remote = game.remotePlayers.get(id);
     if (!remote) return;
     removeRemoteFromIndexes(remote);
@@ -535,7 +547,7 @@
 
   function diagnosticReport() {
     const seconds = Math.max(.001, (performance.now() - diagnostics.startedAt) / 1000);
-    const rigs = [ash, playerTwoRig, botRig, ...creatureRigs.values()].filter(Boolean);
+    const rigs = [ash, playerTwoRig, botRig, ...creatureRigs.values(), ...[...remoteRigs.values()].map(entry => entry.rig)].filter(Boolean);
     const cache = window.BulletAgeCharacter?.getAssetCacheStats?.();
     return {
       type: 'bcd:encore:diagnostics:report', version: BUILD_VERSION,
@@ -574,7 +586,7 @@
           admission: game.room?.connected ? 'accepted' : (game.room?.authoritative ? (game.roomStatusReason === 'room_full' || game.roomStatusReason === 'server_full' ? 'rejected-full' : 'pending') : 'offline'),
           status: game.roomStatusReason || (game.room?.authoritative ? 'unavailable' : 'offline'), players: Number.isFinite(game.roomCount) ? game.roomCount : null,
           occupancyVerified: Number.isFinite(game.roomCount),
-          visibleRemotes: remotePlayersInRange(game.camera.x - 30, game.camera.x + canvas.width + 30, MAX_VISIBLE_REMOTE_SPRITES).length
+          visibleRemotes: remotePlayersInRange(game.camera.x - 128, game.camera.x + canvas.width + 128, MAX_VISIBLE_REMOTE_SPRITES).length
         },
         unavailable: ['GPU timing', 'device temperature', 'battery health', 'memory pressure']
       }
@@ -1321,6 +1333,10 @@
     game.room.publishState({ x: p.x, y: p.y, facing: p.facing, animation: p.animation, health: p.health, name: game.playerName, character: game.loadout.character, color: game.loadout.color, alive: p.alive, respawnTimer: p.respawnTimer });
   }
 
+  const predictor = new window.EncoreMotion.Predictor({ fixed, ledges, world: WORLD });
+  const snapshotBuffer = new window.EncoreMotion.SnapshotBuffer();
+  let presentationPlayers = null;
+  let lastPresentationAt = performance.now();
   let authorityEpoch = null;
   let lastAuthorityEvent = null;
 
@@ -1335,7 +1351,9 @@
     }
     // Positions, damage, deaths, scores, projectiles and pickups are all
     // hydrated from the same server tick. Rendering cannot mutate outcomes.
-    Object.assign(game.player, local);
+    snapshotBuffer.push(snapshot, performance.now());
+    if (game.room.predictionEnabled && predictor.reconcile(local, snapshot.movers, snapshot.epoch)) Object.assign(game.player, predictor.actor);
+    else Object.assign(game.player, local);
     game.playerName = local.name;
     game.bot = { ...snapshot.bot };
     game.creatures = snapshot.creatures.map(creature => ({ ...creature }));
@@ -1394,6 +1412,7 @@
       const fullLabel = reason === 'room_full' && count !== null ? `ROOM FULL · ${count}/8` : labels[reason] || 'SERVER UNAVAILABLE';
       setRoomStatus(connected ? (game.roomCount === null ? 'LIVE' : `LIVE · ${game.roomCount}/8`) : fullLabel, connected);
       if (!connected) {
+        predictor.clear(); snapshotBuffer.clear();
         game.roomCount = count;
         for (const id of [...game.remotePlayers.keys()]) removeRemote(id);
         if (game.room.authoritative) { game.projectiles.length = 0; game.hearts = []; }
@@ -1419,8 +1438,13 @@
   function update() {
     if (game.mode !== 'playing') return;
     if (game.room?.authoritative) {
-      // Shared simulation runs only on the server. This remains true during
-      // reconnect/full-room rejection, so no private replacement world forms.
+      // Predict only local movement while admitted. Shared outcomes and AI
+      // remain server-owned; reconnect/full-room rejection freezes prediction.
+      if (game.room.connected && game.room.predictionEnabled && predictor.actor) {
+        const command = game.room.queueInput(input);
+        if (command && predictor.step(command)) Object.assign(game.player, predictor.actor);
+        input.jumpPressed = input.shootReleased = input.meleePressed = input.dashPressed = false;
+      }
       game.cloudX = (game.cloudX + .25) % 448;
       updateParticles();
       updateCamera();
@@ -1839,15 +1863,22 @@
   }
 
   function drawRemotePlayers() {
-    const remotes = remotePlayersInRange(game.camera.x - 30, game.camera.x + canvas.width + 30, MAX_VISIBLE_REMOTE_SPRITES);
+    const remotes = remotePlayersInRange(game.camera.x - 128, game.camera.x + canvas.width + 128, MAX_VISIBLE_REMOTE_SPRITES);
     let labelled = 0;
-    for (const remote of remotes) {
+    for (const current of remotes) {
+      const remote = presentationPlayers?.get(current.id) || current;
       const x = Math.round(remote.x - game.camera.x), y = Math.round(remote.y);
       ctx.save();
       if (remote.alive === false) ctx.globalAlpha = .3;
       else if (remote.hitTimer > 0) ctx.globalAlpha = .65;
-      ctx.translate(x, y); ctx.scale(remote.facing || 1, 1);
-      ctx.drawImage(remoteSprite(remote), -11, -36);
+      const rig = remoteRigs.get(remote.id)?.rig;
+      if (rig?.ready) {
+        prepareRigForRender(rig, remote.animation || 'idle');
+        rig.draw(x, y, remote.facing || 1, remote.stretch || 1, remote.squash || 1);
+      } else {
+        ctx.translate(x, y); ctx.scale(remote.facing || 1, 1);
+        ctx.drawImage(remoteSprite(remote), -11, -36);
+      }
       ctx.restore();
       if (remote.alive !== false && remote.meleeTimer > 0) {
         const box = meleeHitbox(remote, remote.meleeDirection);
@@ -1877,8 +1908,8 @@
 
   function drawPlayer() {
     const p = game.player;
-    const x = Math.round((p.x - game.camera.x) * 2) / 2;
-    const y = Math.round(p.y - game.camera.y);
+    const x = Math.round((p.x + predictor.offset.x - game.camera.x) * 2) / 2;
+    const y = Math.round(p.y + predictor.offset.y - game.camera.y);
     if (!p.alive) {
       ctx.save();
       ctx.globalAlpha = .78;
@@ -2063,7 +2094,7 @@
     ctx.globalAlpha = 1;
   }
 
-  function render() {
+  function renderArena() {
     ctx.imageSmoothingEnabled = false;
     drawBackdrop();
     drawPlatforms();
@@ -2077,6 +2108,23 @@
     drawRemotePlayers();
     drawPlayer();
     drawAimGuide();
+  }
+
+  function render() {
+    const now = performance.now();
+    predictor.decay(now - lastPresentationAt); lastPresentationAt = now;
+    const sample = game.room?.connected ? snapshotBuffer.sample(now) : null;
+    if (!sample) { renderArena(); return; }
+    // Swap presentation views only during this synchronous draw. Gameplay,
+    // diagnostics and snapshots retain the actual authoritative world state.
+    const fields = ['bot', 'creatures', 'projectiles', 'movers', 'hearts'];
+    const original = Object.fromEntries(fields.map(key => [key, game[key]]));
+    for (const key of fields) game[key] = key === 'movers' && predictor.actor?.alive && game.room.predictionEnabled ? predictor.movers : sample[key];
+    presentationPlayers = new Map(sample.players.map(player => [player.id, player]));
+    try { renderArena(); } finally {
+      for (const key of fields) game[key] = original[key];
+      presentationPlayers = null;
+    }
   }
 
   function vibrate(pattern) {
@@ -2358,7 +2406,7 @@
     botKnockouts: game.kills,
     creatureKnockouts: game.creatureKills,
     hearts: (game.hearts || []).map(heart => ({ id:heart.id, x:heart.x, y:heart.y })),
-    room: { players: game.roomCount, connected: Boolean(game.room?.connected), authoritative: Boolean(game.room?.authoritative), tick: game.room?.tick ?? null, epoch: game.room?.epoch ?? null, remotes: [...game.remotePlayers.values()].map(player => ({ id:player.id, name:player.name, x:Math.round(player.x), y:Math.round(player.y), health:player.health, alive:player.alive, animation:player.animation })) },
+    room: { players: game.roomCount, connected: Boolean(game.room?.connected), authoritative: Boolean(game.room?.authoritative), tick: game.room?.tick ?? null, epoch: game.room?.epoch ?? null, prediction: Boolean(game.room?.connected && game.room?.predictionEnabled), pendingInputs: predictor.pending.length, interpolationMs: Math.round(snapshotBuffer.delayMs), remotes: [...game.remotePlayers.values()].map(player => ({ id:player.id, name:player.name, x:Math.round(player.x), y:Math.round(player.y), health:player.health, alive:player.alive, animation:player.animation })) },
     captureZones: CAPTURE_ZONES.map(zone => {
       const captured = game.capturedZones.get(zone.id);
       const colors = { ...(game.captureProgressByColor?.get(zone.id) || {}) };
@@ -2371,6 +2419,11 @@
   // browser QA loop can verify every creature's death and respawn lifecycle.
   if (localAdminPreview) {
     window.__celestefallTest = {
+      networkState() {
+        const view = snapshotBuffer.sample(performance.now());
+        return { ack: predictor.lastAck, pending: predictor.pending.length,
+          maxError: predictor.maxError, readyRemoteRigs: [...remoteRigs.values()].filter(entry => entry.rig.ready).length, players: view?.players || [] };
+      },
       damageCreature(id, amount = 1) {
         const creature = game.creatures.find(enemy => enemy.id === id);
         return creature ? damageCreature(creature, amount, 0, 0) : false;

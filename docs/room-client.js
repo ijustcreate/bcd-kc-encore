@@ -12,12 +12,14 @@
       this.admission = this.authoritative ? 'pending' : 'offline';
       this.members = new Map(); this.socket = null; this.stopped = false;
       this.seq = 0; this.tick = -1; this.epoch = null; this.retry = 0; this.lastSnapshotAt = 0;
+      this.predictionEnabled = false; this.commandSeq = 0; this.pendingInputs = [];
       this.storageKey = `encore-resume:${this.config.serverUrl}:${this.config.roomId || 'royal'}:${player.id}`;
       try { this.resumeToken = sessionStorage.getItem(this.storageKey); } catch { this.resumeToken = null; }
     }
     emit(type, detail) { this.dispatchEvent(new CustomEvent(type, { detail })); }
     clearMembers(reason, count = null) {
       this.connected = false;
+      this.pendingInputs.length = 0;
       this.statusReason = reason;
       this.admission = reason === 'room_full' || reason === 'server_full' ? 'rejected-full' : (reason === 'offline' ? 'offline' : 'not-connected');
       for (const id of this.members.keys()) if (id !== this.player.id) this.emit('leave', { id });
@@ -41,8 +43,11 @@
         if (url.protocol !== 'wss:' && !(url.protocol === 'ws:' && local && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname))) throw Error('Secure server URL required');
       } catch { this.clearMembers('invalid_server'); return false; }
       if (!this.pump) this.pump = setInterval(() => {
-        const controls = this.inputSource?.();
-        if (this.connected && controls) this.publishInput(controls);
+        if (this.connected && this.predictionEnabled) this.flushInputs();
+        else {
+          const controls = this.inputSource?.();
+          if (this.connected && controls) this.publishInput(controls);
+        }
         if (this.connected && performance.now() - this.lastSnapshotAt > 2000) {
           this.clearMembers('reconnecting'); this.socket?.close(4009, 'snapshot_timeout');
         }
@@ -69,6 +74,8 @@
           this.player.id = msg.id; this.resumeToken = msg.resumeToken;
           try { sessionStorage.setItem(this.storageKey, this.resumeToken); } catch {}
           this.epoch = msg.epoch; this.tick = -1; this.seq = 0;
+          this.predictionEnabled = msg.predictionVersion === 1;
+          this.commandSeq = 0; this.pendingInputs.length = 0;
           this.statusReason = 'welcomed'; this.admission = 'pending';
           this.emit('welcome', msg); return;
         }
@@ -100,6 +107,19 @@
     publishInput(input) {
       if (!this.connected || this.socket?.readyState !== WebSocket.OPEN || this.socket.bufferedAmount > 8192) return;
       this.socket.send(JSON.stringify({ type: 'input', seq: this.seq++, input }));
+    }
+    queueInput(input) {
+      if (!this.connected || !this.predictionEnabled) return null;
+      if (this.pendingInputs.length >= 120) { this.socket?.close(4009, 'input_backlog'); return null; }
+      const command = { seq: this.commandSeq++, input: { ...input } };
+      this.pendingInputs.push(command);
+      return command;
+    }
+    flushInputs() {
+      if (!this.pendingInputs.length || this.socket?.readyState !== WebSocket.OPEN || this.socket.bufferedAmount > 8192) return;
+      const commands = this.pendingInputs.slice(0, 12);
+      this.socket.send(JSON.stringify({ type: 'inputs', commands }));
+      this.pendingInputs.splice(0, commands.length);
     }
     track() {
       if (this.connected && this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ type: 'profile', profile: this.player }));

@@ -1,6 +1,7 @@
 .git
-output
 **/node_modules
-**/.env
+output
+tests
+tools
 docs/assets
 docs/vendor
