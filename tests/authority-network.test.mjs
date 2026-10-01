@@ -11,7 +11,14 @@ test('batched commands acknowledge consumed input only, reject replay and cannot
   const client = await join();
   assert.equal(client.hello.predictionVersion, 1);
   const sim = server.rooms.get('qa').sim, p = sim.game.players.get(client.hello.id);
-  const commands = Array.from({ length: 12 }, (_, seq) => ({ seq, input: { right: true, health: 999, x: 99999 } }));
+  const commands = Array.from({ length: 12 }, (_, seq) => ({ seq, input: {
+    left: false, right: true, up: false, down: false, jumpPressed: false,
+    jumpHeld: false, dashPressed: false, shootHeld: false, shootReleased: false,
+    meleePressed: false, aimAxisX: .123456789, aimAxisY: .987654321,
+    health: 999, x: 99999
+  } }));
+  assert.ok(Buffer.byteLength(JSON.stringify({ type: 'inputs', commands })) > 2048,
+    'a real full command batch needs the bounded 4 KiB packet allowance');
   client.ws.send(JSON.stringify({ type: 'inputs', commands }));
   await until(() => p.inputQueue.length === 12);
   assert.equal(p.ackInputSeq, -1, 'receipt is not simulation acknowledgement');

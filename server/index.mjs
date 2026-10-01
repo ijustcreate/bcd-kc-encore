@@ -30,7 +30,7 @@ export function createAuthority({ origins = [], maxRooms = 32, reconnectMs = 150
     if (req.url === '/health') res.end(JSON.stringify({ ok: true, protocol: PROTOCOL, rooms: rooms.size }));
     else { res.statusCode = 404; res.end('{"error":"not_found"}'); }
   });
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 2048, perMessageDeflate: {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 4096, perMessageDeflate: {
     serverNoContextTakeover: true, clientNoContextTakeover: true,
     threshold: 1024, concurrencyLimit: 4, zlibDeflateOptions: { level: 3 }
   } });
