@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
   <meta name="theme-color" content="#363542">
   <title>BCDKC Encore Royal</title>
-  <link rel="icon" href="assets/ash/Ash.png">
+  <link rel="icon" href="assets/encore-icon.svg" type="image/svg+xml">
   <script>
     // A new iframe document gets new URLs for every first-party build asset.
     // Keep relative paths on Celestefall so storage and the parent handshake survive.
@@ -126,15 +126,18 @@
   </main>
   <script>
     (async () => {
+      const mode = new URLSearchParams(location.search).get('renderer');
+      const baked = mode === 'baked' || (mode !== 'spine' && navigator.maxTouchPoints > 0 && matchMedia('(pointer: coarse)').matches);
       for (const source of [
-        'vendor/spine-3.7/spine-canvas.js?v=3.7.94',
+        ...(baked ? [] : ['vendor/spine-3.7/spine-canvas.js?v=3.7.94']),
         'authority-config.js?v=1.2',
         'spawn-selector.js?v=1.2',
         'corpse-physics.js?v=1.2',
         'heart-drops.js?v=1.2',
-        'ash-character.js?v=1.2',
+        'ash-character.js?v=1.3',
+        'baked-character.js?v=1.3',
         'room-client.js?v=1.2-diagnostics2',
-        'game.js?v=1.2-diagnostics2'
+        'game.js?v=1.3'
       ]) {
         await new Promise((resolve, reject) => {
           const script = document.createElement('script');

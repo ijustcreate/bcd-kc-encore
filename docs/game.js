@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const BUILD_VERSION = '1.2';
+  const BUILD_VERSION = '1.3';
   let disposed = false;
   let animationFrame = 0;
 
@@ -19,17 +19,10 @@
   const REMOTE_CELL_WIDTH = 160;
   const MAX_VISIBLE_REMOTE_SPRITES = 48;
   const MAX_VISIBLE_REMOTE_LABELS = 10;
-  // Canvas Spine rendering is substantially more expensive than the fixed-step
-  // simulation.  Keep its timeline work tied to visible rendering, at a small
-  // cadence, rather than advancing every rig for every catch-up physics step.
-  // Desktop local fighters keep a 15 Hz authored-pose cadence; supporting
-  // actors update less often. The phone profile below lowers these expensive
-  // cache refreshes further while preserving full-resolution pose images.
+  // Mobile poses are compiled into trimmed sheets at build time. Desktop can
+  // retain editable Spine rigs; their expensive pose cache refreshes are timed
+  // independently from animation playback and the fixed simulation clock.
   const TOUCH_PRESENTATION = Boolean(window.matchMedia?.('(pointer: coarse)').matches && navigator.maxTouchPoints > 0);
-  // On a phone, Canvas Spine's mesh compositing is the limiting factor—not the
-  // 640x360 pixel-art canvas. Keep the native canvas and every source texture
-  // at full quality, but only produce a fresh expensive pose when it can be
-  // presented. Input and collision simulation remain at the fixed 60 Hz rate.
   const RIG_UPDATE_INTERVAL = TOUCH_PRESENTATION ? 1 / 6 : 1 / 15;
   const SECONDARY_RIG_UPDATE_INTERVAL = TOUCH_PRESENTATION ? 1 / 3 : 1 / 7;
   const CREATURE_RIG_UPDATE_INTERVAL = TOUCH_PRESENTATION ? 1 / 2 : 1 / 5;
@@ -41,11 +34,10 @@
   // player. Distant AI receives a cadence-preserving heartbeat instead.
   const AI_FULL_SIMULATION_RADIUS = VIEW.width + 96;
   const AI_BACKGROUND_INTERVAL = 12;
-  // iPhone browsers can fall behind badly when several weighted Spine meshes
-  // are recomposited at desktop cadence. A 15 Hz presentation budget is high
-  // enough for responsive touch play and reserves each render slot for the
-  // full-quality cached pose instead of dropping into a 1 FPS backlog.
-  const RENDER_INTERVAL_MS = 1000 / (TOUCH_PRESENTATION ? 15 : 60);
+  // Baked actors need one image draw each; mobile no longer needs the old
+  // 15 FPS mesh-rendering limit. Physics remains 60 Hz regardless of painting.
+  const PRESENTATION_FPS = window.ENCORE_BAKED_RENDERER ? 60 : TOUCH_PRESENTATION ? 15 : 60;
+  const RENDER_INTERVAL_MS = 1000 / PRESENTATION_FPS;
   // Bounded, opt-in diagnostics. These counters are cheap enough to collect
   // continuously, but are only serialized when the host asks for a report.
   const diagnostics = {
@@ -74,9 +66,9 @@
   });
 
   const imageSources = {
-    towerBgLeft: 'assets/tower-bg-left.png',
-    towerBgCenter: 'assets/tower-bg-center.png',
-    towerBgRight: 'assets/tower-bg-right.png',
+    towerBgLeft: (window.ENCORE_BAKED_RENDERER ? 'assets/baked/' : 'assets/') + 'tower-bg-left.png',
+    towerBgCenter: (window.ENCORE_BAKED_RENDERER ? 'assets/baked/' : 'assets/') + 'tower-bg-center.png',
+    towerBgRight: (window.ENCORE_BAKED_RENDERER ? 'assets/baked/' : 'assets/') + 'tower-bg-right.png',
     jump: 'assets/player-jump.png',
     fall: 'assets/player-fall.png',
     cling: 'assets/player-cling.png',
@@ -180,8 +172,9 @@
       return;
     }
     const elapsed = (now - previous.lastUpdate) / 1000;
-    if (elapsed >= interval) {
-      rig.update(Math.min(elapsed, .1), animation);
+    if (rig.baked || elapsed >= interval) {
+      // Pose cadence must not change animation playback speed.
+      rig.update(elapsed, animation);
       previous.lastUpdate = now;
     }
   }
@@ -568,12 +561,12 @@
           userAgent: navigator.userAgent.slice(0, 180)
         },
         runtime: {
-          embedded: window.parent !== window, touchPresentation: TOUCH_PRESENTATION,
-          renderIntervalMs: RENDER_INTERVAL_MS, renderer: rigs.some(rig => rig?.usesWebGL) ? 'WebGL2' : 'Canvas2D',
+          embedded: window.parent !== window, touchPresentation: TOUCH_PRESENTATION && !window.ENCORE_BAKED_RENDERER,
+          renderIntervalMs: RENDER_INTERVAL_MS, renderer: window.ENCORE_BAKED_RENDERER ? 'Canvas2D baked sprites' : 'Canvas2D Spine meshes',
           loadedRigs: rigs.filter(rig => rig?.ready).length, failedRigs: rigs.filter(rig => rig?.failed).length,
           failedImages: [...failedImages], sourceCacheEntries: cache?.entries ?? 'unavailable',
           quality: 'native 640x360; image smoothing off', visibility: document.visibilityState,
-          focused: document.hasFocus(), presentationCap: TOUCH_PRESENTATION ? 15 : 60
+          focused: document.hasFocus(), presentationCap: PRESENTATION_FPS
         },
         room: {
           mode: game.room?.authoritative ? 'authoritative' : 'offline-practice',
@@ -1956,7 +1949,9 @@
       if (rig?.ready) {
         prepareRigForRender(rig, creature.animation, CREATURE_RIG_UPDATE_INTERVAL);
         let drawY = y;
-        if (creature.type === 'bat' && !creature.alive) {
+        if (creature.type === 'bat' && !creature.alive && rig.baked) {
+          drawY -= rig.visibleBottom();
+        } else if (creature.type === 'bat' && !creature.alive) {
           // This rig hangs below its origin. Anchor the intact death pose's
           // visible bottom to the corpse feet used by collision physics.
           const skeleton = rig.skeleton;
@@ -2429,14 +2424,14 @@
       diagnostics.totalFrameMs += gap;
       diagnostics.maxFrameMs = Math.max(diagnostics.maxFrameMs, gap);
       diagnostics.maxStallMs = Math.max(diagnostics.maxStallMs, gap);
-      if (gap > (1000 / (TOUCH_PRESENTATION ? 15 : 60)) * 1.5) diagnostics.droppedFrameCount++;
+      if (gap > RENDER_INTERVAL_MS * 1.5) diagnostics.droppedFrameCount++;
     }
     if (collectDiagnostics) { diagnostics.lastFrameAt = now; diagnostics.frameCount++; }
     frame.accumulator = Math.min(.1, (frame.accumulator || 0) + (now - frame.last) / 1000);
     frame.last = now;
     let steps = 0;
     const updateStarted = collectDiagnostics ? performance.now() : 0;
-    while (frame.accumulator >= STEP && steps < 2) {
+    while (frame.accumulator >= STEP && steps < 6) {
       update();
       frame.updateCount = (frame.updateCount || 0) + 1;
       frame.accumulator -= STEP;
@@ -2454,8 +2449,8 @@
       frame.lastRender = now;
     }
     // Never enter an unbounded catch-up spiral after a suspended/backgrounded
-    // tab, but retain two steps so 30 Hz displays keep full-speed simulation.
-    if (steps === 2 && frame.accumulator >= STEP) frame.accumulator = 0;
+    // tab, but retain six steps so 15–60 Hz callbacks keep full-speed simulation.
+    if (steps === 6 && frame.accumulator >= STEP) frame.accumulator = 0;
     animationFrame = requestAnimationFrame(frame);
   }
 
