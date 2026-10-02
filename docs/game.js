@@ -1,9 +1,11 @@
 (() => {
   'use strict';
 
-  const BUILD_VERSION = '1.5';
+  const BUILD_VERSION = '1.6';
   let disposed = false;
   let animationFrame = 0;
+  let frameTimer = 0;
+  let scheduledFrameToken = 0;
 
   if (window.parent !== window || new URLSearchParams(location.search).get('embed') === '1') {
     document.body.classList.add('is-embedded');
@@ -2395,7 +2397,9 @@
   function shutdown() {
     if (shutdownPromise) return shutdownPromise;
     disposed = true;
+    scheduledFrameToken++;
     cancelAnimationFrame(animationFrame);
+    clearTimeout(frameTimer);
     clearTimeout(helpTimer);
     shutdownPromise = Promise.resolve(game.room?.leave()).catch(() => {});
     return shutdownPromise;
@@ -2532,6 +2536,24 @@
     render();
   };
 
+  // WebKit can aggressively starve requestAnimationFrame inside a visible embedded
+  // iframe (observed at 6-8 Hz on iPhone even when a frame costs <1 ms). Race
+  // rAF against a foreground timer so rAF remains the normal vsync source while
+  // the timer guarantees a usable presentation cadence when WebKit throttles it.
+  function scheduleFrame() {
+    if (disposed) return;
+    const token = ++scheduledFrameToken;
+    const run = now => {
+      if (disposed || token !== scheduledFrameToken) return;
+      if (animationFrame) cancelAnimationFrame(animationFrame);
+      if (frameTimer) clearTimeout(frameTimer);
+      animationFrame = frameTimer = 0;
+      frame(typeof now === 'number' ? now : performance.now());
+    };
+    animationFrame = requestAnimationFrame(run);
+    frameTimer = setTimeout(() => run(performance.now()), 25);
+  }
+
   function frame(now) {
     if (disposed) return;
     const collectDiagnostics = now <= diagnostics.activeUntil;
@@ -2569,7 +2591,7 @@
     // Never enter an unbounded catch-up spiral after a suspended/backgrounded
     // tab, but retain six steps so 15–60 Hz callbacks keep full-speed simulation.
     if (steps === 6 && frame.accumulator >= STEP) frame.accumulator = 0;
-    animationFrame = requestAnimationFrame(frame);
+    scheduleFrame();
   }
 
   async function boot() {
@@ -2581,7 +2603,7 @@
     if (window.parent === window && window.ENCORE_SERVER_URL) connectRoom({});
     else if (window.parent === window) setRoomStatus('OFFLINE PRACTICE', false);
     render();
-    animationFrame = requestAnimationFrame(frame);
+    scheduleFrame();
 
     const fallbackImages = Promise.all(Object.entries(imageSources).map(([key, source]) => new Promise(resolve => {
       const image = new Image();
