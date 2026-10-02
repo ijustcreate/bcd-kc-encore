@@ -99,12 +99,12 @@
       const frame = this.currentFrame();
       return frame[6] + frame[4];
     }
-    draw(x, y, facing, stretch = 1, squash = 1) {
+    draw(x, y, facing, stretch = 1, squash = 1, pixelSnap = true) {
       if (!this.ready) return;
       const [page, sx, sy, w, h, ox, oy] = this.currentFrame();
       const ctx = this.context;
       ctx.save();
-      ctx.translate(Math.round(x), Math.round(y));
+      ctx.translate(pixelSnap ? Math.round(x) : x, pixelSnap ? Math.round(y) : y);
       ctx.scale(facing * stretch, squash);
       // Trimmed frame offsets are relative to the same authored ground anchor.
       ctx.drawImage(this.sheet.images[page], sx, sy, w, h, ox, oy, w, h);

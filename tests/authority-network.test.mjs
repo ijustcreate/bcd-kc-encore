@@ -75,7 +75,7 @@ async function setup(t) {
 test('two clients see the same bot targeting, slug kill, falling heart, late join and one pickup', async t => {
   const { server, join, advance } = await setup(t);
   const a = await join({ name: 'Felix', color: '#e85d5d' });
-  const b = await join({ name: '00Codex', color: '#4fa3ff' });
+  const b = await join({ name: '00Codex', color: '#65cf84' });
   const sim = server.rooms.get('qa').sim;
   const pa = sim.game.players.get(a.hello.id), pb = sim.game.players.get(b.hello.id);
   pa.x = 100; pb.x = 550;
@@ -116,7 +116,7 @@ test('two clients see the same bot targeting, slug kill, falling heart, late joi
 
 test('death and random respawn survive reconnect; forged outcomes and repeated controls do not', async t => {
   const { server, join, advance } = await setup(t);
-  const a = await join({ name: 'Felix' }); const b = await join({ name: '00Codex', color: '#4fa3ff' });
+  const a = await join({ name: 'Felix' }); const b = await join({ name: '00Codex', color: '#65cf84' });
   const sim = server.rooms.get('qa').sim, p = sim.game.players.get(a.hello.id);
   a.ws.send(JSON.stringify({ type: 'hit', targetId: b.hello.id, amount: 999 }));
   a.ws.send(JSON.stringify({ type: 'state', x: 9999, health: 999, alive: false }));

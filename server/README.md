@@ -12,6 +12,10 @@ The listener uses `PORT` (default 8787) and `HOST` (default 0.0.0.0). Terminate 
 
 No database or secret client key is required. Room admission and server-issued random resume tokens prevent clients from choosing another player's entity ID. Names are display labels supplied by the BCD launcher, not server-verified account claims. Do not use them for authorization or awards. The existing BCD achievement bridge is separate from room authority.
 
+The blue AI fighter belongs to team `#4fa3ff`. It chooses only living, connected players of other colors; allied melee, stomps and projectiles cannot damage either side. Changing a player's color immediately changes targeting and damage eligibility. Bats and slugs remain hostile creatures.
+
+For the Dell v1.5 update, fetch the latest `main`, preserve any local Windows runner configuration and test-path fixes, run `node --test tests/*.test.mjs`, and update the runner's actual deployed source directory. Restart only the authority process through its supervisor, leaving `cloudflared` running so the current Quick Tunnel URL stays available. Verify `/health`, one authority process, and blue-player immunity/red-player hostility through the public connection. An authority restart resets the match and reconnects clients. The browser assets update independently through GitHub Pages.
+
 ## Operational limits
 
 - One replica/process; no cluster mode, horizontal autoscaling or overlapping deployments. Stop the old process before starting its replacement. Scaling beyond one process needs a room directory with exclusive ownership leases first.

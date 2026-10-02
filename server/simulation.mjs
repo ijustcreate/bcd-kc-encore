@@ -134,6 +134,7 @@ export function createSimulation({ random = Math.random } = {}) {
 
   function freshBot(x = BOT_SPAWN.x, y = BOT_SPAWN.y) {
     return {
+      color: '#4fa3ff',
       x,
       y,
       vx: 0,
@@ -476,7 +477,7 @@ export function createSimulation({ random = Math.random } = {}) {
     game.bot = { ...freshBot(desiredX, floor?.y || BOT_SPAWN.y), id: 'bot' };
   }
 
-  function updateBot() {
+  function updateBot(hasEnemy = true) {
     const bot = game.bot;
     if (!bot.alive) {
       bot.respawnTimer -= 1;
@@ -493,12 +494,12 @@ export function createSimulation({ random = Math.random } = {}) {
     bot.hitTimer = Math.max(0, bot.hitTimer - 1);
     bot.grounded = botStandingSurface();
 
-    const distance = game.player.x - bot.x;
+    const distance = hasEnemy ? game.player.x - bot.x : 0;
     const verticalDistance = (game.player.y - PLAYER_H / 2) - (bot.y - PLAYER_H / 2);
     const direction = Math.abs(distance) > 78 ? Math.sign(distance) : 0;
     if (direction) bot.facing = direction;
 
-    if (bot.meleeCooldown <= 0 && Math.abs(distance) < 48 && Math.abs(verticalDistance) < 62) {
+    if (hasEnemy && bot.meleeCooldown <= 0 && Math.abs(distance) < 48 && Math.abs(verticalDistance) < 62) {
       const requestedDirection = verticalDistance < -14 ? 'up' : (verticalDistance > 14 ? 'down' : 'forward');
       let commit = true;
       if (requestedDirection === 'up') {
@@ -536,7 +537,7 @@ export function createSimulation({ random = Math.random } = {}) {
       bot.vx = 0;
       if (bot.grounded) bot.vy = -6.2;
     }
-    if (overlap(botRect(), rectAt())) {
+    if (hasEnemy && overlap(botRect(), rectAt())) {
       const side = Math.sign(distance) || -bot.facing || 1;
       bot.x = game.player.x - side * 34;
       bot.vx = -side * .7;
@@ -552,13 +553,13 @@ export function createSimulation({ random = Math.random } = {}) {
       bot.grounded = landing;
     } else bot.y = nextY;
 
-    if (Math.abs(distance) > 90 && Math.abs(distance) < 380 && bot.shootCooldown <= 0) {
+    if (hasEnemy && Math.abs(distance) > 90 && Math.abs(distance) < 380 && bot.shootCooldown <= 0) {
       spawnProjectile(bot, 'bot');
       bot.shootTimer = 15;
       bot.shootCooldown = 150 + Math.floor(random() * 55);
     }
 
-    if (meleeCanHit(bot) && !bot.meleeConnected && overlap(meleeHitbox(bot, bot.meleeDirection), rectAt())) {
+    if (hasEnemy && meleeCanHit(bot) && !bot.meleeConnected && overlap(meleeHitbox(bot, bot.meleeDirection), rectAt())) {
       bot.meleeConnected = true;
       const knockbackX = bot.meleeDirection === 'forward' ? bot.facing * 3.8 : Math.sign(game.player.x - bot.x) * 1.6;
       const knockbackY = bot.meleeDirection === 'up' ? -4 : (bot.meleeDirection === 'down' ? 3.1 : -2.5);
@@ -597,7 +598,7 @@ export function createSimulation({ random = Math.random } = {}) {
     const p = game.player;
     if (p.stompCooldown > 0 || p.vy < 0) return;
     const targets = [];
-    if (game.bot.alive) targets.push({ actor: game.bot, rect: botRect(), isBot: true });
+    if (game.bot.alive && !sameTeam(p, game.bot)) targets.push({ actor: game.bot, rect: botRect(), isBot: true });
     for (const creature of game.creatures) {
       if (creature.alive) targets.push({ actor: creature, rect: creatureRect(creature), isBot: false });
     }
@@ -639,10 +640,12 @@ export function createSimulation({ random = Math.random } = {}) {
     if (game.events.length > 64) game.events.shift();
   }
 
+  const sameTeam = (a, b) => Boolean(a?.color && b?.color && a.color.toLowerCase() === b.color.toLowerCase());
+
   function nearest(actor) {
     let chosen = null, best = Infinity;
     for (const p of game.players.values()) {
-      if (!p.alive || !p.connected) continue;
+      if (!p.alive || !p.connected || sameTeam(actor, p)) continue;
       const distance = Math.hypot(p.x - actor.x, p.y - actor.y);
       if (distance < best) { chosen = p; best = distance; }
     }
@@ -674,14 +677,14 @@ export function createSimulation({ random = Math.random } = {}) {
   function hitPlayer(kx, ky) {
     const p = game.player;
     if (!p.alive || p.invulnerable > 0) return false;
-    const attacker = game.players.get(attackerId);
-    if (attacker && attacker !== p && attacker.color === p.color) return false;
+    const attacker = attackerId === 'bot' ? game.bot : game.players.get(attackerId);
+    if (attacker && attacker !== p && sameTeam(attacker, p)) return false;
     p.health = Math.max(0, p.health - 1);
     Object.assign(p, { invulnerable: 45, vx: kx, vy: ky, hitTimer: 14 });
     if (!p.health) {
       Object.assign(p, { alive: false, respawnTimer: PLAYER_RESPAWN_FRAMES, animation: 'death', animationTime: 0, vx: kx * .35, vy: Math.min(ky, -2.8) });
       p.deaths++;
-      if (attacker && attacker !== p) attacker.kills++;
+      if (attacker && attacker !== p && game.players.has(attacker.id)) attacker.kills++;
     }
     emit(p.alive ? 'hit' : 'death', { targetId: p.id, attackerId, x: p.x, y: p.y });
     return true;
@@ -689,7 +692,7 @@ export function createSimulation({ random = Math.random } = {}) {
 
   function damageBot(amount, kx, ky) {
     const b = game.bot;
-    if (!b.alive) return false;
+    if (!b.alive || sameTeam(game.players.get(attackerId), b)) return false;
     b.health = Math.max(0, b.health - amount);
     Object.assign(b, { vx: kx, vy: ky, hitTimer: 16, animation: b.health ? 'hit' : 'death' });
     if (!b.health) {
@@ -727,7 +730,7 @@ export function createSimulation({ random = Math.random } = {}) {
     const p = game.player;
     if (!meleeCanHit(p) || p.meleeConnected) return;
     const box = meleeHitbox(p, p.meleeDirection);
-    let target = game.bot.alive && overlap(box, botRect()) ? game.bot : null;
+    let target = game.bot.alive && !sameTeam(p, game.bot) && overlap(box, botRect()) ? game.bot : null;
     target ||= game.creatures.find(c => c.alive && overlap(box, creatureRect(c)));
     target ||= [...game.players.values()].find(other => other !== p && other.alive && other.color !== p.color && overlap(box, rectAt(other.x, other.y, other.crouching ? PLAYER_CROUCH_H : PLAYER_H)));
     if (!target) return;
@@ -765,14 +768,14 @@ export function createSimulation({ random = Math.random } = {}) {
       if (note.life <= 0) continue;
       attackerId = note.ownerId;
       if (note.owner === 'player') {
-        if (game.bot.alive && overlap(box, botRect())) {
+        if (game.bot.alive && !sameTeam(note, game.bot) && overlap(box, botRect())) {
           damageBot(1, Math.sign(note.vx) * 3.4, -2.5); note.life = 0; continue;
         }
         const creature = game.creatures.find(c => c.alive && overlap(box, creatureRect(c)));
         if (creature) { damageCreature(creature, 1, Math.sign(note.vx) * 2.7, note.vy * .25); note.life = 0; continue; }
       }
       for (const p of game.players.values()) {
-        if (!p.alive || p.id === note.ownerId || (note.owner === 'player' && p.color === note.color)) continue;
+        if (!p.alive || p.id === note.ownerId || sameTeam(p, note)) continue;
         if (!overlap(box, rectAt(p.x, p.y, p.crouching ? PLAYER_CROUCH_H : PLAYER_H))) continue;
         select(p); hitPlayer(Math.sign(note.vx) * 2.8, -2.5); note.life = 0; break;
       }
@@ -829,8 +832,7 @@ export function createSimulation({ random = Math.random } = {}) {
     const target = nearest(game.bot);
     if (target || fallback) {
       select(target || fallback); attackerId = 'bot';
-      if (target || !game.bot.alive) updateBot();
-      else game.bot.animation = 'idle';
+      updateBot(Boolean(target));
     }
     for (const creature of game.creatures) {
       const target = nearest(creature);

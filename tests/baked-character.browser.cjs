@@ -7,6 +7,7 @@ const root = path.resolve(__dirname, '../docs');
 (async () => {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/authority-config.js') return res.end("window.ENCORE_SERVER_URL='';");
     if (url.pathname === '/embed') return res.end('<iframe style="width:100%;height:100vh;border:0" src="/?embed=1&admin=1"></iframe>');
     if (url.pathname === '/parity') return res.end('<script>window.encoreAssetUrl=x=>x</script><script src="/vendor/spine-3.7/spine-canvas.js"></script><script src="/ash-character.js"></script><script>window.LiveCharacter=BulletAgeCharacter</script><script src="/baked-character.js"></script>');
     const file = path.join(root, url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname));
@@ -27,12 +28,12 @@ const root = path.resolve(__dirname, '../docs');
         window.__ready = false; window.__renders = 0;
         addEventListener('message', e => { if (e.data?.type === 'bcd:encore:ready') window.__ready = true; });
         const draw = CanvasRenderingContext2D.prototype.drawImage;
-        CanvasRenderingContext2D.prototype.drawImage = function (...args) { if (this.canvas.id === 'game' && args[0].width === 1920) window.__renders++; return draw.apply(this, args); };
+        CanvasRenderingContext2D.prototype.drawImage = function (...args) { if (this.canvas.id === 'game' && args[0].width === 1920 && args[4] === 360) window.__renders++; return draw.apply(this, args); };
       });
       await page.goto(base + (mode === 'embedded' ? '/embed' : mode === 'desktop-spine' ? '/?admin=1&renderer=spine' : '/?admin=1'));
       await page.waitForFunction(() => window.__ready);
       const frame = mode === 'embedded' ? page.frames()[1] : page.mainFrame();
-      assert.equal(await frame.evaluate(() => JSON.parse(render_game_to_text()).buildVersion), '1.4');
+      assert.equal(await frame.evaluate(() => JSON.parse(render_game_to_text()).buildVersion), '1.5');
       if (!mode.startsWith('desktop')) {
         assert.equal(await frame.evaluate(() => typeof spine), 'undefined');
         assert.equal(requests.some(url => /\/assets\/(ash|player2|bat|slug)\//.test(url)), false);
@@ -70,7 +71,30 @@ const root = path.resolve(__dirname, '../docs');
         // Exercise real loadout controls while animation and simulation run.
         await frame.locator('[data-character="p2"]').click();
         assert.equal(await frame.evaluate(() => JSON.parse(render_game_to_text()).player.character), 'P2');
-        await page.screenshot({ path: `/tmp/encore-${mode}-v1.3.png` });
+        const camera = await frame.evaluate(() => JSON.parse(render_game_to_text()).camera);
+        assert.equal(camera.zoom, .9); assert.ok(camera.width > 710);
+        const jumpSamples = await frame.evaluate(async () => {
+          __celestefallTest.setPlayerPosition(520, 336);
+          const samples = [], draw = BulletAgeCharacter.prototype.draw;
+          BulletAgeCharacter.prototype.draw = function (...args) { if (args[5] === false) samples.push(args[1]); return draw.apply(this, args); };
+          dispatchEvent(new KeyboardEvent('keydown', { code: 'Space' }));
+          await new Promise(resolve => setTimeout(resolve, 250));
+          dispatchEvent(new KeyboardEvent('keyup', { code: 'Space' }));
+          BulletAgeCharacter.prototype.draw = draw;
+          return samples;
+        });
+        assert.ok(jumpSamples.some(y => Math.abs(y - Math.round(y)) > .05), 'jump presentation retains subpixel positions');
+        assert.ok(Math.max(...jumpSamples) - Math.min(...jumpSamples) > 20, 'jump visibly moves before returning');
+        await frame.evaluate(() => __celestefallTest.hitPlayer(3));
+        const death = await frame.evaluate(() => JSON.parse(render_game_to_text()));
+        assert.equal(death.player.alive, false); assert.ok(death.effects.particles >= 28); assert.ok(death.effects.particles <= 192); assert.ok(death.effects.bursts > 0);
+        await frame.evaluate(() => advanceTime(3000));
+        const respawn = await frame.evaluate(() => JSON.parse(render_game_to_text()));
+        assert.equal(respawn.player.alive, true); assert.ok(respawn.effects.particles >= 24); assert.ok(respawn.effects.bursts > 0);
+        await page.screenshot({ path: `/tmp/encore-${mode}-v1.5.png` });
+        await frame.evaluate(() => advanceTime(800));
+        assert.equal(await frame.evaluate(() => JSON.parse(render_game_to_text()).effects.bursts), 0);
+
       }
       assert.deepEqual(errors, []);
       await context.close();

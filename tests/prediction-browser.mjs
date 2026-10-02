@@ -14,7 +14,7 @@ const staticServer = http.createServer((req, res) => {
   const name = new URL(req.url, 'http://localhost').pathname;
   if (name === '/authority-config.js') { res.setHeader('Content-Type', 'text/javascript'); return res.end(`window.ENCORE_SERVER_URL=${JSON.stringify(endpoint)};`); }
   const file = path.resolve(root, '.' + (name === '/' ? '/index.html' : decodeURIComponent(name)));
-  if (!file.startsWith(root + '/') || !fs.existsSync(file)) { res.statusCode = 404; return res.end(); }
+  if (!file.startsWith(root + path.sep) || !fs.existsSync(file)) { res.statusCode = 404; return res.end(); }
   res.setHeader('Content-Type', { '.js': 'text/javascript', '.html': 'text/html', '.json': 'application/json', '.css': 'text/css', '.png': 'image/png' }[path.extname(file)] || 'text/plain');
   res.end(fs.readFileSync(file));
 });
@@ -53,7 +53,7 @@ try {
     window.__submitted = 0;
     const draw = CanvasRenderingContext2D.prototype.drawImage;
     CanvasRenderingContext2D.prototype.drawImage = function (...args) {
-      if (this.canvas.id === 'game' && args[0].width === 1920) window.__submitted++;
+      if (this.canvas.id === 'game' && args[0].width === 1920 && args[4] === 360) window.__submitted++;
       return draw.apply(this, args);
     };
   });

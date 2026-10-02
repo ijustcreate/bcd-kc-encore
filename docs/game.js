@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const BUILD_VERSION = '1.4';
+  const BUILD_VERSION = '1.5';
   let disposed = false;
   let animationFrame = 0;
 
@@ -30,6 +30,10 @@
   // One display tall and exactly three landscape camera widths wide.
   const WORLD = { width: 1920, height: 360 };
   const VIEW = { width: 640, height: 360 };
+  const MAX_PARTICLES = 192;
+  const cameraZoom = () => innerHeight > innerWidth ? .9 : 1;
+  const cameraWidth = () => VIEW.width / cameraZoom();
+  let previousLocalPose = null;
   // Fully simulate opponents only where their decisions can affect the local
   // player. Distant AI receives a cadence-preserving heartbeat instead.
   const AI_FULL_SIMULATION_RADIUS = VIEW.width + 96;
@@ -448,6 +452,7 @@
 
   function freshBot(x = BOT_SPAWN.x, y = BOT_SPAWN.y) {
     return {
+      color: '#4fa3ff',
       x,
       y,
       vx: 0,
@@ -586,7 +591,7 @@
           admission: game.room?.connected ? 'accepted' : (game.room?.authoritative ? (game.roomStatusReason === 'room_full' || game.roomStatusReason === 'server_full' ? 'rejected-full' : 'pending') : 'offline'),
           status: game.roomStatusReason || (game.room?.authoritative ? 'unavailable' : 'offline'), players: Number.isFinite(game.roomCount) ? game.roomCount : null,
           occupancyVerified: Number.isFinite(game.roomCount),
-          visibleRemotes: remotePlayersInRange(game.camera.x - 128, game.camera.x + canvas.width + 128, MAX_VISIBLE_REMOTE_SPRITES).length
+          visibleRemotes: remotePlayersInRange(game.camera.x - 128, game.camera.x + cameraWidth() + 128, MAX_VISIBLE_REMOTE_SPRITES).length
         },
         unavailable: ['GPU timing', 'device temperature', 'battery health', 'memory pressure']
       }
@@ -731,7 +736,7 @@
   }
 
   function emitDust(x, y, amount = 5) {
-    for (let i = 0; i < amount; i += 1) {
+    for (let i = 0; i < amount && game.particles.length < MAX_PARTICLES; i += 1) {
       game.particles.push({
         x: x + (Math.random() - .5) * 12,
         y,
@@ -747,7 +752,8 @@
     for (const particle of game.particles) {
       particle.x += particle.vx;
       particle.y += particle.vy;
-      particle.vy += .07;
+      particle.vy += particle.gravity ?? .07;
+      particle.vx *= particle.drag ?? 1;
       particle.life -= 1;
       if (particle.life > 0) game.particles[write++] = particle;
     }
@@ -819,7 +825,7 @@
 
   function damageBot(amount, knockbackX, knockbackY, effectX = game.bot.x, effectY = game.bot.y - 17) {
     const bot = game.bot;
-    if (!bot.alive) return false;
+    if (!bot.alive || game.loadout.color === bot.color) return false;
     bot.health -= amount;
     bot.vx = knockbackX;
     bot.vy = knockbackY;
@@ -854,7 +860,7 @@
       player.animationTime = 0;
       player.vx = knockbackX * .35;
       player.vy = Math.min(knockbackY, -2.8);
-      emitDust(player.x, player.y - 17, 20);
+      emitDeathBurst(player.x, player.y, game.loadout.color);
       game.room?.send('eliminated', { victimId: game.room.player.id, killerId: game.lastAttacker || null });
     }
     return true;
@@ -1094,12 +1100,13 @@
     bot.hitTimer = Math.max(0, bot.hitTimer - 1);
     bot.grounded = botStandingSurface();
 
-    const distance = game.player.x - bot.x;
+    const hasEnemy = game.player.alive && game.loadout.color.toLowerCase() !== bot.color.toLowerCase();
+    const distance = hasEnemy ? game.player.x - bot.x : 0;
     const verticalDistance = (game.player.y - PLAYER_H / 2) - (bot.y - PLAYER_H / 2);
     const direction = Math.abs(distance) > 78 ? Math.sign(distance) : 0;
     if (direction) bot.facing = direction;
 
-    if (bot.meleeCooldown <= 0 && Math.abs(distance) < 48 && Math.abs(verticalDistance) < 62) {
+    if (hasEnemy && bot.meleeCooldown <= 0 && Math.abs(distance) < 48 && Math.abs(verticalDistance) < 62) {
       const requestedDirection = verticalDistance < -14 ? 'up' : (verticalDistance > 14 ? 'down' : 'forward');
       let commit = true;
       if (requestedDirection === 'up') {
@@ -1137,7 +1144,7 @@
       bot.vx = 0;
       if (bot.grounded) bot.vy = -6.2;
     }
-    if (overlap(botRect(), rectAt())) {
+    if (hasEnemy && overlap(botRect(), rectAt())) {
       const side = Math.sign(distance) || -bot.facing || 1;
       bot.x = game.player.x - side * 34;
       bot.vx = -side * .7;
@@ -1153,13 +1160,13 @@
       bot.grounded = landing;
     } else bot.y = nextY;
 
-    if (Math.abs(distance) > 90 && Math.abs(distance) < 380 && bot.shootCooldown <= 0) {
+    if (hasEnemy && Math.abs(distance) > 90 && Math.abs(distance) < 380 && bot.shootCooldown <= 0) {
       spawnProjectile(bot, 'bot');
       bot.shootTimer = 15;
       bot.shootCooldown = 150 + Math.floor(Math.random() * 55);
     }
 
-    if (meleeCanHit(bot) && !bot.meleeConnected && overlap(meleeHitbox(bot, bot.meleeDirection), rectAt())) {
+    if (hasEnemy && meleeCanHit(bot) && !bot.meleeConnected && overlap(meleeHitbox(bot, bot.meleeDirection), rectAt())) {
       bot.meleeConnected = true;
       const knockbackX = bot.meleeDirection === 'forward' ? bot.facing * 3.8 : Math.sign(game.player.x - bot.x) * 1.6;
       const knockbackY = bot.meleeDirection === 'up' ? -4 : (bot.meleeDirection === 'down' ? 3.1 : -2.5);
@@ -1190,7 +1197,7 @@
       note.life -= 1;
       if (collidesSolid(note.x, note.y + PLAYER_H / 2, 2)) note.life = 0;
 
-      if (note.owner === 'player' && bot.alive && overlap({ x: note.x - 4, y: note.y - 4, w: 8, h: 8 }, botRect())) {
+      if (note.owner === 'player' && game.loadout.color !== bot.color && bot.alive && overlap({ x: note.x - 4, y: note.y - 4, w: 8, h: 8 }, botRect())) {
         note.life = 0;
         damageBot(1, Math.sign(note.vx || game.player.facing) * 3.4, -2.5);
       }
@@ -1213,7 +1220,7 @@
         }
       }
 
-      if (note.owner === 'bot' && overlap({ x: note.x - 4, y: note.y - 4, w: 8, h: 8 }, rectAt())) {
+      if (note.owner === 'bot' && game.loadout.color !== bot.color && overlap({ x: note.x - 4, y: note.y - 4, w: 8, h: 8 }, rectAt())) {
         note.life = 0;
         hitPlayer(Math.sign(note.vx) * 2.8, -2.5);
       }
@@ -1242,7 +1249,7 @@
     const p = game.player;
     if (!meleeCanHit(p) || p.meleeConnected) return;
     const hitbox = meleeHitbox(p, p.meleeDirection);
-    const botTarget = game.bot.alive && overlap(hitbox, botRect()) ? game.bot : null;
+    const botTarget = game.bot.alive && game.loadout.color !== game.bot.color && overlap(hitbox, botRect()) ? game.bot : null;
     const creatureTarget = game.creatures.find(creature => creature.alive && overlap(hitbox, creatureRect(creature)));
     const target = botTarget || creatureTarget;
     if (!target) return;
@@ -1257,7 +1264,7 @@
     const p = game.player;
     if (p.stompCooldown > 0 || p.vy < 0) return;
     const targets = [];
-    if (game.bot.alive) targets.push({ actor: game.bot, rect: botRect(), isBot: true });
+    if (game.bot.alive && game.loadout.color !== game.bot.color) targets.push({ actor: game.bot, rect: botRect(), isBot: true });
     for (const creature of game.creatures) {
       if (creature.alive) targets.push({ actor: creature, rect: creatureRect(creature), isBot: false });
     }
@@ -1319,9 +1326,28 @@
     }
   }
 
+  function emitLifeSparks(x, y, color, respawning) {
+    const count = respawning ? 24 : 28;
+    for (let i = 0; i < count && game.particles.length < MAX_PARTICLES; i++) {
+      const angle = i / count * Math.PI * 2;
+      const radius = respawning ? 16 + Math.random() * 14 : Math.random() * 5;
+      const speed = respawning ? -.65 : 1.2 + Math.random() * 1.8;
+      const life = 25 + Math.random() * 18;
+      game.particles.push({ x: x + Math.cos(angle) * radius, y: y - 17 + Math.sin(angle) * radius,
+        vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - (respawning ? .9 : 1.1),
+        life, maxLife: life, color: i % 3 ? color : '#fff1c2', size: i % 4 ? 2 : 3,
+        gravity: respawning ? -.012 : .07, drag: .97 });
+    }
+  }
+
+  function emitDeathBurst(x, y, color) {
+    emitLifeSparks(x, y, color, false);
+    if (game.respawnBursts.length < 16) game.respawnBursts.push({ x, y, color, life: 24, maxLife: 24, death: true });
+  }
+
   function emitRespawnBurst(x, y, color) {
-    game.respawnBursts.push({ x, y, color, life: 32, maxLife: 32 });
-    emitDust(x, y - 18, 18);
+    if (game.respawnBursts.length < 16) game.respawnBursts.push({ x, y, color, life: 36, maxLife: 36 });
+    emitLifeSparks(x, y, color, true);
   }
 
   function publishRoomState() {
@@ -1343,6 +1369,7 @@
   function applyAuthoritySnapshot(snapshot) {
     const local = snapshot.players.find(player => player.id === game.room.player.id);
     if (!local) return;
+    const before = { x: game.player.x, y: game.player.y, alive: game.player.alive, spawnSerial: game.player.spawnSerial };
     if (snapshot.epoch !== authorityEpoch) {
       authorityEpoch = snapshot.epoch;
       lastAuthorityEvent = null;
@@ -1354,6 +1381,13 @@
     snapshotBuffer.push(snapshot, performance.now());
     if (game.room.predictionEnabled && predictor.reconcile(local, snapshot.movers, snapshot.epoch)) Object.assign(game.player, predictor.actor);
     else Object.assign(game.player, local);
+    if (previousLocalPose) {
+      if (before.alive !== local.alive || before.spawnSerial !== local.spawnSerial || snapshot.epoch !== previousLocalPose.epoch) previousLocalPose = null;
+      else {
+        previousLocalPose.x += game.player.x - before.x;
+        previousLocalPose.y += game.player.y - before.y;
+      }
+    }
     game.playerName = local.name;
     game.bot = { ...snapshot.bot };
     game.creatures = snapshot.creatures.map(creature => ({ ...creature }));
@@ -1377,7 +1411,8 @@
       for (const event of events) {
         if (event.id <= lastAuthorityEvent) continue;
         if (event.type === 'respawn') emitRespawnBurst(event.x, event.y, event.color);
-        if (['hit', 'death', 'heal'].includes(event.type)) emitDust(event.x, event.y - 16, event.type === 'death' ? 16 : 7);
+        if (event.type === 'death') emitDeathBurst(event.x, event.y, snapshot.players.find(p => p.id === event.targetId)?.color || '#e9bd68');
+        if (['hit', 'heal'].includes(event.type)) emitDust(event.x, event.y - 16, 7);
         if (event.targetId === local.id && event.type === 'hit') vibrate(16);
         if (event.type === 'death' && event.attackerId === local.id && snapshot.players.some(p => p.id === event.targetId)) emitGameEvent('first_pk', { victimId: event.targetId });
         if (event.type === 'capture' && event.contributors?.some(p => p.id === local.id)) emitGameEvent('capture_point', { zone: event.zoneId });
@@ -1653,12 +1688,11 @@
     const p = game.player;
     const lookAhead = p.facing * Math.min(46, Math.abs(p.vx) * 18);
     const portrait = innerHeight > innerWidth;
-    // Portrait CSS deliberately crops the wide canvas to create the requested
-    // zoom. Let the logical camera travel beyond the level bounds there so the
-    // player stays in that central crop at both ends of the map.
-    const minX = portrait ? -VIEW.width / 2 + 24 : 0;
-    const maxX = portrait ? WORLD.width - VIEW.width / 2 - 24 : WORLD.width - VIEW.width;
-    const targetX = Math.max(minX, Math.min(maxX, p.x - VIEW.width / 2 + lookAhead));
+    // Keep the player centered in the portrait crop while showing more world.
+    const width = cameraWidth();
+    const minX = portrait ? -width / 2 + 24 : 0;
+    const maxX = portrait ? WORLD.width - width / 2 - 24 : WORLD.width - width;
+    const targetX = Math.max(minX, Math.min(maxX, p.x - width / 2 + lookAhead));
     if (force) game.camera.x = targetX;
     else game.camera.x += (targetX - game.camera.x) * .075;
     game.camera.y = 0;
@@ -1666,6 +1700,7 @@
 
   function recenterAfterLayoutChange() {
     requestAnimationFrame(() => {
+      previousLocalPose = null;
       updateCamera(true);
       render();
     });
@@ -1679,10 +1714,19 @@
       const cameraX = Math.round(game.camera.x);
       const sourceX = Math.max(0, cameraX);
       const destinationX = Math.max(0, -cameraX);
-      const visibleWidth = Math.min(VIEW.width - destinationX, WORLD.width - sourceX);
+      const visibleWidth = Math.min(cameraWidth() - destinationX, WORLD.width - sourceX);
       ctx.fillStyle = '#090914';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-      if (visibleWidth > 0) ctx.drawImage(backgroundLayer, sourceX, 0, visibleWidth, VIEW.height, destinationX, 0, visibleWidth, VIEW.height);
+      if (visibleWidth > 0) {
+        ctx.drawImage(backgroundLayer, sourceX, 0, visibleWidth, VIEW.height, destinationX, 0, visibleWidth, VIEW.height);
+        // Extend the cathedral ceiling into the headroom opened by the zoom.
+        const headroom = VIEW.height / cameraZoom() - VIEW.height;
+        if (headroom > 0) {
+          ctx.save(); ctx.scale(1, -1);
+          ctx.drawImage(backgroundLayer, sourceX, 0, visibleWidth, headroom, destinationX, 0, visibleWidth, headroom);
+          ctx.restore();
+        }
+      }
       return;
     }
     ctx.fillStyle = '#090914';
@@ -1695,7 +1739,7 @@
     ctx.imageSmoothingEnabled = true;
     panels.forEach((image, section) => {
       const x = Math.round(section * VIEW.width - game.camera.x);
-      if (!image || x > canvas.width || x + VIEW.width < 0) return;
+      if (!image || x > cameraWidth() || x + VIEW.width < 0) return;
       ctx.drawImage(image, x, 0, VIEW.width, VIEW.height);
     });
     ctx.restore();
@@ -1722,7 +1766,7 @@
   function drawRockBlock(block, target = ctx, cameraX = game.camera.x) {
     const x = Math.round(block.x - cameraX);
     const y = Math.round(block.y - game.camera.y);
-    if (x + block.w < -24 || x > target.canvas.width + 24) return;
+    if (x + block.w < -24 || x > (target === ctx ? cameraWidth() : target.canvas.width) + 24) return;
     target.fillStyle = '#171522';
     target.fillRect(x, y, block.w, block.h);
     target.fillStyle = '#322b42';
@@ -1747,7 +1791,7 @@
   function drawThinPlatform(platform, target = ctx, cameraX = game.camera.x) {
     const x = Math.round(platform.x - cameraX);
     const y = Math.round(platform.y - game.camera.y);
-    if (x + platform.w < -20 || x > target.canvas.width + 20) return;
+    if (x + platform.w < -20 || x > (target === ctx ? cameraWidth() : target.canvas.width) + 20) return;
     target.fillStyle = '#160f1b';
     target.fillRect(x - 1, y - 1, platform.w + 2, platform.h + 3);
     target.fillStyle = '#d2a04e';
@@ -1793,7 +1837,7 @@
   function drawCaptureZones() {
     for (const zone of CAPTURE_ZONES) {
       const x = Math.round(zone.x - game.camera.x), y = CAPTURE_MARKER_Y.get(zone.id) - game.camera.y;
-      if (x + zone.w < 0 || x > canvas.width) continue;
+      if (x + zone.w < 0 || x > cameraWidth()) continue;
       const captured = game.capturedZones.get(zone.id);
       // Use all server colors so remote progress never takes the viewer's color.
       const colors = { ...(game.captureProgressByColor?.get(zone.id) || {}) };
@@ -1852,18 +1896,24 @@
       const progress = 1 - burst.life / burst.maxLife;
       const x = burst.x - game.camera.x;
       const y = burst.y - 17;
-      if (x < -48 || x > canvas.width + 48) continue;
+      if (x < -48 || x > cameraWidth() + 48) continue;
       ctx.save();
       ctx.globalAlpha = (1 - progress) * .85;
       ctx.strokeStyle = burst.color;
       ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(x, y, 8 + progress * 30, 0, Math.PI * 2); ctx.stroke();
+      const radius = burst.death ? 5 + progress * 27 : 30 - progress * 22;
+      ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.stroke();
+      if (!burst.death) {
+        ctx.globalAlpha *= .35;
+        ctx.fillStyle = burst.color;
+        ctx.fillRect(x - 5 * (1 - progress), burst.y - 48, 10 * (1 - progress), 48);
+      }
       ctx.restore();
     }
   }
 
   function drawRemotePlayers() {
-    const remotes = remotePlayersInRange(game.camera.x - 128, game.camera.x + canvas.width + 128, MAX_VISIBLE_REMOTE_SPRITES);
+    const remotes = remotePlayersInRange(game.camera.x - 128, game.camera.x + cameraWidth() + 128, MAX_VISIBLE_REMOTE_SPRITES);
     let labelled = 0;
     for (const current of remotes) {
       const remote = presentationPlayers?.get(current.id) || current;
@@ -1908,8 +1958,13 @@
 
   function drawPlayer() {
     const p = game.player;
-    const x = Math.round((p.x + predictor.offset.x - game.camera.x) * 2) / 2;
-    const y = Math.round(p.y + predictor.offset.y - game.camera.y);
+    const alpha = Math.max(0, Math.min(1, (frame.accumulator ?? STEP) / STEP));
+    const previous = previousLocalPose;
+    const blend = previous && previous.alive === p.alive && previous.spawnSerial === p.spawnSerial && Math.hypot(previous.x - p.x, previous.y - p.y) < 48;
+    const displayX = blend ? previous.x + (p.x - previous.x) * alpha : p.x;
+    const displayY = blend ? previous.y + (p.y - previous.y) * alpha : p.y;
+    const x = displayX + predictor.offset.x - game.camera.x;
+    const y = displayY + predictor.offset.y - game.camera.y;
     if (!p.alive) {
       ctx.save();
       ctx.globalAlpha = .78;
@@ -1925,7 +1980,7 @@
     const selectedRig = activePlayerRig();
     if (selectedRig?.ready) {
       prepareRigForRender(selectedRig, p.animation);
-      selectedRig.draw(x, y, p.facing, p.stretch, p.squash);
+      selectedRig.draw(x, y, p.facing, p.stretch, p.squash, false);
     } else {
       const image = playerFrame();
       if (image) {
@@ -1947,7 +2002,7 @@
     if (!bot || (!bot.alive && bot.respawnTimer < 75)) return;
     const x = Math.round((bot.x - game.camera.x) * 2) / 2;
     const y = Math.round(bot.y - game.camera.y);
-    if (x < -60 || x > canvas.width + 60) return;
+    if (x < -60 || x > cameraWidth() + 60) return;
 
     if (botRig?.ready) {
       prepareRigForRender(botRig, bot.animation, SECONDARY_RIG_UPDATE_INTERVAL);
@@ -1975,7 +2030,7 @@
       if (!creature.alive && creature.respawnTimer < 88 && (creature.type !== 'bat' || creature.grounded)) continue;
       const x = Math.round((creature.x - game.camera.x) * 2) / 2;
       const y = Math.round(creature.y - game.camera.y);
-      if (x < -70 || x > canvas.width + 70) continue;
+      if (x < -70 || x > cameraWidth() + 70) continue;
       const rig = creatureRigs.get(creature.id);
       if (rig?.ready) {
         prepareRigForRender(rig, creature.animation, CREATURE_RIG_UPDATE_INTERVAL);
@@ -2029,7 +2084,7 @@
     ctx.save();
     for (const heart of game.hearts || []) {
       const x = Math.round(heart.x - game.camera.x), y = Math.round(heart.y - game.camera.y);
-      if (x < -12 || x > VIEW.width + 12 || y < -12 || y > VIEW.height + 12) continue;
+      if (x < -12 || x > cameraWidth() + 12 || y < -12 || y > VIEW.height + 12) continue;
       if (heart.life < 180 && Math.floor(heart.life / 10) % 2 === 0) continue;
       ctx.fillStyle = '#ff668a'; ctx.strokeStyle = '#542039'; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(x, y + 5);
@@ -2045,7 +2100,7 @@
     for (const note of game.projectiles) {
       const x = Math.round(note.x - game.camera.x);
       const y = Math.round(note.y - game.camera.y);
-      if (x < -24 || x > canvas.width + 24 || y < -24 || y > canvas.height + 24) continue;
+      if (x < -24 || x > cameraWidth() + 24 || y < -24 || y > canvas.height + 24) continue;
       const trailX = note.trailX ?? Math.sign(note.vx);
       const trailY = note.trailY ?? 0;
       ctx.strokeStyle = note.owner === 'player' ? '#fff3b0' : '#8ed7ff';
@@ -2086,15 +2141,21 @@
     for (const particle of game.particles) {
       const x = Math.round(particle.x - game.camera.x);
       const y = Math.round(particle.y - game.camera.y);
-      if (x < -2 || x > canvas.width + 2 || y < -2 || y > canvas.height + 2) continue;
+      if (x < -2 || x > cameraWidth() + 2 || y < -2 || y > canvas.height + 2) continue;
       const alpha = Math.min(1, particle.life / 10);
       ctx.globalAlpha = alpha;
-      ctx.fillRect(x, y, 2, 2);
+      ctx.fillStyle = particle.color || '#f4ecd7';
+      ctx.fillRect(x, y, particle.size || 2, particle.size || 2);
     }
     ctx.globalAlpha = 1;
   }
 
   function renderArena() {
+    ctx.fillStyle = '#090914'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    const zoom = cameraZoom();
+    ctx.translate(0, VIEW.height * (1 - zoom));
+    ctx.scale(zoom, zoom);
     ctx.imageSmoothingEnabled = false;
     drawBackdrop();
     drawPlatforms();
@@ -2108,6 +2169,7 @@
     drawRemotePlayers();
     drawPlayer();
     drawAimGuide();
+    ctx.restore();
   }
 
   function render() {
@@ -2346,7 +2408,8 @@
     coordinateSystem: 'origin top-left; x increases right; y increases down; world units are pixels',
     mode: game.mode,
     world: WORLD,
-    camera: { x: Math.round(game.camera.x), y: Math.round(game.camera.y), width: VIEW.width, height: VIEW.height },
+    camera: { x: Math.round(game.camera.x), y: Math.round(game.camera.y), width: cameraWidth(), height: VIEW.height / cameraZoom(), zoom: cameraZoom() },
+    effects: { particles: game.particles.length, bursts: game.respawnBursts.length },
     player: {
       name: game.playerName,
       x: Math.round(game.player.x),
@@ -2429,6 +2492,7 @@
         return creature ? damageCreature(creature, amount, 0, 0) : false;
       },
       setPlayerPosition(x, y) {
+        previousLocalPose = null;
         game.player.x = x;
         game.player.y = y;
         game.player.vx = 0;
@@ -2485,6 +2549,7 @@
     let steps = 0;
     const updateStarted = collectDiagnostics ? performance.now() : 0;
     while (frame.accumulator >= STEP && steps < 6) {
+      previousLocalPose = { x: game.player.x, y: game.player.y, alive: game.player.alive, spawnSerial: game.player.spawnSerial, epoch: authorityEpoch };
       update();
       frame.updateCount = (frame.updateCount || 0) + 1;
       frame.accumulator -= STEP;
@@ -2511,6 +2576,7 @@
     // Start physics and controls immediately. The high-resolution Spine rigs
     // can finish streaming without leaving the canvas or input loop inert.
     setupLoadoutControls();
+    botRig?.setTeamChroma('p2', '#4fa3ff');
     resetGame();
     if (window.parent === window && window.ENCORE_SERVER_URL) connectRoom({});
     else if (window.parent === window) setRoomStatus('OFFLINE PRACTICE', false);
